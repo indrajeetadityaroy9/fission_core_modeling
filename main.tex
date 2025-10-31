@@ -1,0 +1,385 @@
+\documentclass[11pt]{article}
+\usepackage{amsmath}
+\usepackage{booktabs}
+\usepackage[hidelinks]{hyperref}
+\usepackage{geometry}
+\geometry{a4paper, margin=1in}
+
+\title{A Two-Region Nonlinear Delay Model of the RBMK Reactor Core: Analysis of the Chernobyl Power Excursion}
+\author{}
+\date{}
+
+\begin{document}
+
+\maketitle
+
+\begin{center}
+\textbf{MATH 5131: Mathematical Methods and Models}
+\end{center}
+
+\section{Background}
+The 1986 Chernobyl Nuclear Power Plant accident is a fascinating case study in nonlinear dynamics and complex system failure. The RBMK reactor design was inherently unstable due to its large core and weak negative feedback, making reactivity control difficult \cite{INSAG7,WNA_RBMK}. From a modeling perspective, the event represents a rapid, self-reinforcing transition from stable operation to runaway instability, driven by the interaction of multiple feedback mechanisms linking neutron kinetics, thermal-hydraulics, and power generation \cite{NP_Chernobyl,NEA_Chapter1}.\\
+
+A compact mathematical model can analyze how these interacting feedback loops, spatial effects, and control delays pushed the system from stability to divergence. Modeling this transition  provides broader insight into the behavior of complex energy systems where positive feedbacks dominate or control actions lag. The findings can help improve the understanding of stability margins in nuclear reactor design and inform control strategies in other large-scale systems such as nuclear reactors and renewable power grids where nonlinear feedback can lead to catastrophic failure if not properly managed.
+
+\section{Objective}
+The objective of this project is to develop and analyze a compact two-region nonlinear model of the RBMK reactor core to explain how interacting feedbacks drove the Chernobyl reactor from stable operation to a runaway power surge. The model captures the competition between fast positive reactivity from coolant void formation and slower negative reactivity from fuel Doppler heating, comparing their relative time scales and strengths \cite{Duderstadt1976,Lewis2008}. Spatial coupling is included to study how delayed upward coolant transport creates axial power imbalance and oscillatory behavior. Control-system dynamics are modeled to assess the effects of slow control-rod insertion and the temporary positive reactivity from graphite-tipped rods \cite{INSAG7}. Stability and time-domain simulations will identify the conditions and parameter thresholds that trigger prompt-neutron instability and uncontrolled power escalation.
+
+\section{Model Overview}\label{sec:model}
+The RBMK reactor core is represented as two axially stacked regions—a Lower (L) and an Upper (U) half—denoted by $i \in {L, U}$. These regions are dynamically coupled through neutron and heat exchange to capture the axial behavior that contributed to the Chernobyl instability \cite{INSAG7,WNA_RBMK}. The accident is modeled as a rapid, self-reinforcing power excursion driven by interactions among key state variables through multiple feedback loops.
+
+This section defines the system variables, notation, and governing equations for each feedback mechanism, followed by the total reactivity balance and coupled dynamical system.
+
+\subsection{State Variables}
+The dynamic behavior of each region $i$ is described by the state vector
+\[
+\mathbf{x}_i(t) = [n_i,\, C_i,\, \alpha_i,\, T_{f,i},\, I_i,\, X_i,\, c_i]^{\!\top},
+\]
+where:
+
+\begin{itemize}
+    \item \textbf{$n_i(t)$} — \textit{Neutron Density}: Local neutron population proportional to fission rate and power.
+    \item \textbf{$C_i(t)$} — \textit{Delayed Neutron Precursors}: Concentration of fission products emitting delayed neutrons, moderating reactivity changes.
+    \item \textbf{$\alpha_i(t)$} — \textit{Coolant Void Fraction}: Fraction of coolant volume occupied by steam; higher $\alpha_i$ introduces positive reactivity in the RBMK design.
+    \item \textbf{$T_{f,i}(t)$} — \textit{Fuel Temperature}: Mean fuel temperature; higher $T_{f,i}$ increases resonance absorption (Doppler effect), introducing stabilizing negative feedback.
+    \item \textbf{$I_i(t)$}, \textbf{$X_i(t)$} — \textit{Iodine and Xenon Concentrations}: Concentrations of fission products providing delayed, long-term negative reactivity feedback.
+    \item \textbf{$c_i(t)$} — \textit{Control-Rod Worth Fraction}: Normalized control variable ($0 \le c_i \le 1$) representing the control rod insertion depth and associated negative reactivity contribution.
+\end{itemize}
+\subsection{Derived and Auxiliary Variables}
+\begin{itemize}
+    \item \textbf{$\rho_i(t)$} — \textit{Local Reactivity}: Instantaneous fractional reactivity, capturing the combined effect of feedback and control inputs.
+    \item \textbf{$P_i(t)$} — \textit{Local Power}: Power in region $i$, proportional to neutron density, $P_i = k_P n_i$.
+    \item \textbf{$P(t)$} — \textit{Total Core Power}: Sum of regional core powers, $P = P_L + P_U$.
+    \item \textbf{$\mathrm{AO}(t)$} — \textit{Axial Offset}: Normalized core axial power imbalance, \(\mathrm{AO}(t) = \frac{P_U - P_L}{P_U + P_L}\)
+    with $\mathrm{AO}=0$ indicating balanced power and nonzero values indicating core spatial instability.
+\end{itemize}
+
+\subsection{Physical Mechanisms and Instability Pathway}
+To clarify the role of each model variable and feedback term, this subsection summarizes the destabilizing interactions represented in the system.\\
+
+The main mechanism of instability arises from the competition between fast positive feedback from coolant void formation and slower negative feedback from fuel Doppler heating \cite{INSAG7,Lewis2008}. At low power levels, small increases in neutron density ($n_i$) produce more steam in the coolant channels, raising the void fraction ($\alpha_i$) and further increasing reactivity. This positive feedback quickly amplifies power, while the slower Doppler response—where rising fuel temperature ($T_{f,i}$) increases neutron absorption and adds negative reactivity—cannot react fast enough to stabilize the system. Below about 20\% of nominal power, the void effect dominates, leading to unstable growth in neutron population \cite{Stacey2007}.\\
+
+During shutdown, the insertion of control rods introduces an additional instability. As the control-rod worth fraction ($c_i$) increases, the graphite tips of the rods briefly replace water with graphite, adding temporary positive reactivity in the lower core \cite{INSAG7}. This local pulse pushes the already unstable system beyond the prompt-critical limit, causing a rapid exponential rise in neutron density ($n_i$) and power output \cite{Duderstadt1976,Lewis2008,NP_PointKinetics}. The delayed neutron precursors ($C_i$), normally stabilizing during steady operation, play little role in this fast, prompt-neutron excursion.
+
+\subsection{Equations}
+The symbol $\delta_{ab}$ distinguishes between the two core regions: $\delta_{iL}=1$ for the Lower (L) region and $0$ otherwise, and $\delta_{iU}=1$ for the Upper (U) region and $0$ otherwise. The opposite region of $i$ is denoted by $j$ ($j=U$ when $i=L$, and $j=L$ when $i=U$), used in coupling terms such as $D_n[n_j - n_i]$.
+
+\subsubsection{Neutron Kinetics Model}
+This component describes how the neutron population evolves in each region of the core and forms the foundation of the RBMK reactor core model. It connects all feedback mechanisms—coolant voids, fuel temperature, xenon poisoning, and control rods—to the power generated by fission. The total reactivity $\rho_i(t)$ represents the combined effect of these feedbacks on neutron multiplication \cite{Duderstadt1976,Lewis2008,NP_PointKinetics}.
+\paragraph{\textbf{Constants}}
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$\beta$ & fraction of neutrons that are delayed \\
+$\Lambda$ & mean time between prompt neutron generations \\
+$\lambda_d$ & decay rate of delayed neutron precursors \\
+$D_n$ & neutron coupling coefficient between core regions \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{\textbf{$n_i(t)$ --- \textit{Neutron Density}}}
+\begin{equation}
+\frac{d n_i}{d t} =
+\frac{\rho_i(t) - \beta}{\Lambda} n_i(t)
++ \lambda_d C_i(t)
++ D_n [n_j(t) - n_i(t)],
+\label{eq:neutron_density}
+\end{equation}
+The neutron population changes through three effects:
+(1) the prompt term $\frac{\rho_i - \beta}{\Lambda} n_i$ reflecting immediate reactivity impact,
+(2) the delayed neutron source $\lambda_d C_i$, which slows the reactor response and enhances control, and
+(3) the coupling term $D_n [n_j - n_i]$, representing neutron exchange between the upper and lower regions that affects spatial power balance.
+
+\paragraph{\textbf{$C_i(t)$ --- \textit{Delayed Neutron Precursors}}}
+\begin{equation}
+\frac{d C_i}{d t} =
+\frac{\beta}{\Lambda} n_i(t)
+- \lambda_d C_i(t),
+\label{eq:precursor_concentration}
+\end{equation}
+Delayed neutron precursors are fission fragments that emit neutrons after a short decay period. Their production term $\frac{\beta}{\Lambda} n_i$ and decay term $-\lambda_d C_i$ define a natural stabilizing mechanism by slowing the reactor’s response to reactivity changes.
+
+\subsubsection{Xenon Poisoning Dynamics}
+This component models how Iodine-135 and Xenon-135 evolve over time and affect reactivity. Both isotopes absorb neutrons and provide delayed negative feedback that stabilizes the reactor. Xenon-135 is especially important because it is a strong absorber and dominates reactivity behavior after power changes, particularly at low power \cite{Duderstadt1976,Lewis2008,NP_Xenon}.
+
+\paragraph{\textbf{Constants}}
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\ 
+\midrule
+$y_I$ & Yield of Iodine-135 per fission event \\
+$y_X$ & Direct yield of Xenon-135 per fission event \\
+$\lambda_I$ & Decay constant of Iodine-135 (s$^{-1}$) \\
+$\lambda_X$ & Decay constant of Xenon-135 (s$^{-1}$) \\
+$\sigma'_X$ & Effective neutron absorption coefficient of Xenon-135 \\
+$\kappa_X$ & Reactivity coefficient associated with Xenon concentration \\
+$p_{X0}$ & Nominal xenon reactivity at reference power \\
+$a$ & Xenon burnout parameter (controls reactivity decrease with power) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{\textbf{$I_i(t), X_i(t)$ --- \textit{Dynamic (Slow) Model}}}
+\begin{align}
+\frac{dI_i}{dt} &= y_I n_i - \lambda_I I_i, \\[4pt]
+\frac{dX_i}{dt} &= \lambda_I I_i + y_X n_i - \lambda_X X_i - \sigma'_X n_i X_i.
+\end{align}
+Iodine-135 is produced by fission and decays into Xenon-135, which both absorbs neutrons and decays with time. The resulting negative reactivity,
+\[
+\rho_{X,i}(t) = -\kappa_X X_i,
+\]
+acts as a delayed stabilizing feedback that moderates long-term power oscillations.
+
+\paragraph{\textbf{$\rho_{X,i}(t)$ --- \textit{Algebraic (Fast) Model}}}
+\begin{equation}
+\rho_{X,i}(t) = -\frac{p_{X0}}{1 + a P_i(t)}.
+\end{equation}
+For rapid power changes, xenon concentration cannot adjust as quickly as the neutron flux.This algebraic form approximates short-term effects: at low power, xenon builds up and adds strong negative reactivity; at high power, it burns out, weakening the effect \cite{Lewis2008,NP_Xenon}.\\
+
+Using both models captures xenon behavior on two time scales---slow dynamics for long-term control and a fast approximation for short-term transients---balancing accuracy and computational simplicity in the RBMK core model. The algebraic (fast) xenon model is used in Scenarios A--C from the evaluation section, while the dynamic (slow) model is applied in Scenario D to assess long-term xenon poisoning effects.
+
+\subsubsection{Coolant Void Fraction Dynamics}
+This component models how steam bubbles form and move through the coolant channels in each part of the core. In the RBMK reactor, a higher void fraction means less water to absorb neutrons, increasing reactivity and potentially causing instability at low power \cite{INSAG7,Stacey2007,WNA_RBMK}.
+
+\paragraph{\textbf{Constants}}
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$\tau_{v,i}$ & time constant for void buildup \\
+$k_{\mathrm{adv}}$ & coefficient for steam advection between regions \\
+$\tau_{\mathrm{flow}}$ & coolant transport delay between regions \\
+$\alpha_{i,\max}$ & maximum attainable void fraction \\
+$p_i$ & shape factor controlling boiling curve steepness \\
+$k_P$ & power conversion constant (from $n_i$ to $P_i$) \\
+$h_{fg}$ & latent heat of vaporization \\
+$\dot{m}_i$ & coolant mass flow rate (assumed constant) \\
+$\kappa_{V,i}$ & void reactivity coefficient (positive for RBMK) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{\textbf{$\alpha_i(t)$ --- \textit{Void Fraction Dynamics}}}
+\begin{align}
+\frac{d\alpha_L}{dt} &= 
+\frac{\alpha_{L,\mathrm{eq}}\big(x_L(t)\big) - \alpha_L(t)}{\tau_{v,L}}, \\[3pt]
+\frac{d\alpha_U}{dt} &= 
+\frac{\alpha_{U,\mathrm{eq}}\big(x_U(t)\big) - \alpha_U(t)}{\tau_{v,U}} 
++ k_{\mathrm{adv}}\left[\alpha_L\big(t - \tau_{\mathrm{flow}}\big) - \alpha_U(t)\right].
+\end{align}
+Each region’s void fraction approaches its equilibrium value $\alpha_{i,\mathrm{eq}}$ over a characteristic time $\tau_{v,i}$. The second term models delayed upward transport of steam from the lower to the upper region, introducing a short time lag $\tau_{\mathrm{flow}}$ that links regional dynamics and can enhance instability if not balanced by negative feedbacks.
+
+\paragraph{\textbf{$\alpha_{i,\mathrm{eq}}$ --- \textit{Equilibrium Void Fraction}}}
+\begin{equation}
+\alpha_{i,\mathrm{eq}}(x_i) = 
+\alpha_{i,\max} \frac{x_i^{p_i}}{1 + x_i^{p_i}}, 
+\qquad 
+\text{where} \quad x_i(t) = \frac{k_P n_i(t)}{\dot{m}_i h_{fg}}.
+\end{equation}
+The equilibrium void fraction increases nonlinearly with power. At low power, $\alpha_i$ is small; as $n_i$ (and hence $x_i$) rises, boiling intensifies toward $\alpha_{i,\max}$. The shape factor $p_i$ determines how sharply this transition occurs \cite{Stacey2007}.
+
+\paragraph{\textbf{$\rho_{\mathrm{void},i}(t)$ --- \textit{Reactivity from Voids}}}
+\begin{equation}
+\rho_{\mathrm{void},i}(t) = \kappa_{V,i}\,\alpha_i(t).
+\end{equation}
+Since $\kappa_{V,i} > 0$, more steam increases reactivity, reinforcing power growth. Reducing voids—e.g., by raising coolant flow—lowers reactivity and stabilizes the system. This formulation captures both the slow buildup of voids during steady operation and faster transients following power changes.
+
+\subsubsection{Fuel Temperature Dynamics and Doppler Feedback}
+This component models how fuel temperature changes with power and how this change affects reactivity through the Doppler effect. When the fuel heats up, uranium atoms absorb more neutrons without fissioning, adding negative reactivity that slows the chain reaction. This inherent negative feedback helps stabilize reactor power \cite{Duderstadt1976,Lewis2008,NP_Doppler}.
+
+\paragraph{\textbf{Constants}}
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$a_f$ & coefficient linking neutron density to heat generation \\
+$b_f$ & heat transfer coefficient between fuel and coolant \\
+$T_{c,i}$ & coolant temperature in region $i$ (assumed constant) \\
+$T_{f0}$ & reference fuel temperature \\
+$\kappa_{D0}$ & Doppler reactivity coefficient (negative) \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{\textbf{$T_{f,i}(t)$ --- \textit{Fuel Temperature Change}}}
+\begin{equation}
+\frac{dT_{f,i}}{dt} = a_f n_i(t) - b_f[T_{f,i}(t) - T_{c,i}].
+\end{equation}
+The first term, $a_f n_i(t)$, represents heating from fission---higher neutron density produces more heat. The second term, $-b_f[T_{f,i} - T_{c,i}]$, models cooling as heat transfers from the fuel to the coolant at temperature $T_{c,i}$. The balance between these terms determines how quickly the fuel heats or cools. A rise in $T_{f,i}$ strengthens negative reactivity feedback, countering further power increases.
+
+\paragraph{\textbf{$\rho_{\mathrm{Doppler},i}(t)$ --- \textit{Reactivity from Doppler Effect}}}
+\begin{equation}
+\rho_{\mathrm{Doppler},i}(t) = \kappa_{D0}\big(\sqrt{T_{f,i}(t)} - \sqrt{T_{f0}}\big).
+\end{equation}
+This equation directly links temperature to reactivity. As $T_{f,i}$ increases, the square-root term grows, and since $\kappa_{D0}$ is negative, $\rho_{\mathrm{Doppler},i}$ becomes more negative---automatically reducing reactivity and stabilizing power. If the fuel cools, reactivity slightly increases, allowing power to recover. This temperature--reactivity relationship represents one of the most critical intrinsic safety mechanisms in reactor physics: the Doppler feedback.
+
+\subsubsection{Control Rod Dynamics and Reactivity}
+This component models how control-rod motion changes reactivity in each region of the reactor core. Control rods absorb neutrons and reduce reactivity when inserted. In the RBMK design, the rods move slowly, and their graphite tips briefly increase reactivity when first entering the lower part of the core \cite{INSAG7,WNA_RBMK}.
+
+\paragraph{\textbf{Constants}}
+\begin{center}
+\begin{tabular}{@{}ll@{}}
+\toprule
+\textbf{Symbol} & \textbf{Description} \\
+\midrule
+$\tau_c$ & control-rod motion time constant \\
+$u_i$ & commanded control-rod position (setpoint) \\
+$\rho_{c,\max}$ & maximum negative reactivity from full insertion \\
+$\Delta\rho_{\mathrm{tip},0}$ & amplitude of graphite-tip positive reactivity pulse \\
+$\tau_{\mathrm{tip}}$ & decay constant of the graphite-tip pulse \\
+$t_s$ & start time of control-rod insertion \\
+$\delta_{iL}$ & indicator (1 for lower region, 0 otherwise) \\
+$H(t - t_s)$ & Heaviside step function activating the pulse \\
+\bottomrule
+\end{tabular}
+\end{center}
+
+\paragraph{\textbf{$c_i(t)$ --- \textit{Control-Rod Position}}}
+\begin{equation}
+\frac{dc_i}{dt} = \frac{u_i - c_i(t)}{\tau_c}.
+\end{equation}
+Here $u_i$ is the control-rod command position, and $c_i(t)$ is the actual insertion depth. The time constant $\tau_c$ determines how quickly the rods move toward their commanded position. During normal operation or shutdown, the rods gradually approach a steady configuration corresponding to the desired reactivity level.
+
+\paragraph{\textbf{$\rho_{c,i}(t)$ --- \textit{Reactivity from Control Rods}}}
+\begin{equation}
+\rho_{c,i}(t) = -\rho_{c,\max}\,c_i(t).
+\end{equation}
+As rods insert farther into the fuel, negative reactivity increases, lowering neutron density and power. At steady conditions this produces a constant offset that helps maintain controlled operation or full shutdown.
+
+\paragraph{\textbf{$\rho_{\mathrm{tip},i}(t)$ --- \textit{Graphite-Tip Reactivity Pulse}}}
+The graphite-tip effect applies only to the lower region ($i=L$):
+\begin{equation}
+\rho_{\mathrm{tip},i}(t) =
+\delta_{iL}
+\left[
+\Delta\rho_{\mathrm{tip},0}
+\exp\left(-\frac{t - t_s}{\tau_{\mathrm{tip}}}\right)
+H(t - t_s)
+\right].
+\end{equation}
+This term models a short positive reactivity spike that occurs when the graphite displacers enter the core at the start of the shutdown sequence ($t=t_s$). The Heaviside step function, $H(t - t_s)$, is essential for this model because it acts as a switch that initiates the event at a discrete point in time. For any time $t$ before the shutdown begins ($t < t_s$), the function is zero, correctly ensuring the reactivity pulse is absent. At the moment of shutdown ($t \ge t_s$), the function becomes one, effectively "turning on" the exponential decay term that governs the pulse's rapid evolution and subsequent fade as the boron absorber section of the rod enters the core. This transient pulse reproduces the brief but critical reactivity increase that contributed to the Chernobyl instability \cite{INSAG7,Malko2002,INIS_Multidimensional}.
+
+\subsection{Total Reactivity Balance}
+In each region $i \in \{L, U\}$, the total reactivity is the sum of all feedback contributions that determine how the neutron population evolves over time:
+\begin{equation}
+\rho_i(t) = \rho_0
++ \rho_{\mathrm{void},i}(t)
++ \rho_{\mathrm{Doppler},i}(t)
++ \rho_{X,i}(t)
++ \rho_{c,i}(t)
++ \rho_{\mathrm{tip},i}(t).
+\label{eq:total_reactivity}
+\end{equation}
+Here $\rho_0$ is the reference reactivity, adjusted so that the reactor is critical ($\rho_i=0$) under steady-state conditions. Each term represents a physical feedback process: coolant voids ($\rho_{\mathrm{void},i}$), fuel temperature ($\rho_{\mathrm{Doppler},i}$), xenon poisoning ($\rho_{X,i}$), control rods ($\rho_{c,i}$), and the graphite-tip pulse ($\rho_{\mathrm{tip},i}$). Together, these components define the instantaneous reactivity response to both slow and fast mechanisms within the core.
+
+\subsection{Coupled System of Equations}
+The complete model combines all feedbacks into a single nonlinear dynamical system that tracks the two interacting regions of the core. The main state variables for each region are $\{n_i, C_i, T_{f,i}, \alpha_i, c_i\}$, with $\{I_i, X_i\}$ included when xenon poisoning is modeled. The governing equations are:
+\begin{align*}
+    \frac{d n_i}{dt} &= \frac{\rho_i(t) - \beta}{\Lambda}n_i(t) + \lambda_d C_i(t) + D_n[n_j(t) - n_i(t)], \\[4pt]
+    \frac{d C_i}{dt} &= \frac{\beta}{\Lambda}n_i(t) - \lambda_d C_i(t), \\[4pt]
+    \frac{dT_{f,i}}{dt} &= a_f n_i(t) - b_f[T_{f,i}(t) - T_{c,i}], \\[4pt]
+    \frac{d\alpha_i}{dt} &= \frac{\alpha_{i,\mathrm{eq}}(x_i) - \alpha_i(t)}{\tau_{v,i}} + \delta_{iU} k_{\mathrm{adv}}\left[\alpha_L(t - \tau_{\mathrm{flow}}) - \alpha_U(t)\right], \\[4pt]
+    \frac{dc_i}{dt} &= \frac{u_i - c_i(t)}{\tau_c}.
+\end{align*}
+
+This set of coupled nonlinear Ordinary Differential Equations (ODEs) becomes a system of Delay Differential Equations (DDEs) due to the coolant transport delay $\tau_{\mathrm{flow}}$ between core regions. The inter-region coupling terms allow the model to capture spatial feedback effects, how changes in one half of the core influence the other, reproducing the axial power imbalance and instability observed in the RBMK reactor core during low-power operation.
+
+\section{Methods and Simulation Plan}
+\subsection{Methods}
+The RBMK reactor’s two-region dynamic model will be implemented and analyzed in MATLAB. The approach combines analytical and numerical techniques to determine when the reactor is stable, when it becomes unstable, and how interacting feedbacks lead to a power surge. The methods will be implemented in three stages: (1) equilibrium analysis, (2) linear stability evaluation, and (3) nonlinear time-domain simulation \cite{Uspuras2015,INIS_Multidimensional}.
+
+\subsubsection{Model Setup and Parameters}
+The Delay Differential Equation (DDE) system from Section~\ref{sec:model} will be coded as a MATLAB function. All parameters---such as neutron kinetics constants ($\beta$, $\Lambda$), reactivity feedback coefficients ($\kappa_{V,i}$, $\kappa_{D0}$), and time constants ($\tau_{v,i}$, $\tau_{\mathrm{flow}}$)---will be stored in a unified \texttt{params} structure for clarity and reproducibility. Parameter values will be obtained from the INSAG-7 report and published RBMK analyses \cite{INSAG7}.
+
+\subsubsection{Solving and Analysis Methods}
+The model will be examined using three complementary computational methods, each addressing a different mathematical aspect of the system.
+
+\paragraph{1. Steady-State Equilibrium Analysis}
+\textbf{Objective:} Determine the steady-state operating conditions of the RBMK core where all time derivatives vanish,
+\[
+\frac{dn_i}{dt} = \frac{dC_i}{dt} = \frac{dT_{f,i}}{dt} = \frac{d\alpha_i}{dt} = \frac{dc_i}{dt} = 0, \quad i \in \{L, U\}.
+\]
+At equilibrium, the system of differential equations from Section~\ref{sec:model} reduces to a set of coupled nonlinear equations describing the reactor’s self-consistent balance among neutron population, temperature, and reactivity feedbacks:
+\begin{align*}
+    0 &= \frac{\bar{\rho}_i - \beta}{\Lambda} \bar{n}_i + \lambda_d \bar{C}_i + D_n(\bar{n}_j - \bar{n}_i), \\
+    0 &= \frac{\beta}{\Lambda} \bar{n}_i - \lambda_d \bar{C}_i, \\
+    0 &= a_f \bar{n}_i - b_f(\bar{T}_{f,i} - T_{c,i}), \\
+    0 &= \frac{\alpha_{i,\mathrm{eq}}(\bar{x}_i) - \bar{\alpha}_i}{\tau_{v,i}} + \delta_{iU} k_{\mathrm{adv}}[\bar{\alpha}_L - \bar{\alpha}_U], \\
+    0 &= \frac{u_i - \bar{c}_i}{\tau_c}.
+\end{align*}
+These equations are nonlinear because $\bar{\rho}_i$ itself depends on several state variables through the reactivity balance
+\[
+\bar{\rho}_i = \rho_0 + \kappa_{V,i} \bar{\alpha}_i + \kappa_{D0}\big(\sqrt{\bar{T}_{f,i}} - \sqrt{T_{f0}}\big) - \rho_{c,\max} \bar{c}_i - \kappa_X \bar{X}_i,
+\]
+and because $\alpha_{i,\mathrm{eq}}$ is a sigmoidal function of $x_i = \frac{k_P \bar{n}_i}{\dot{m}_i h_{fg}}$. The full equilibrium problem will be solved numerically in MATLAB using \texttt{fsolve}, which iteratively computes the steady-state values $\bar{n}_i$, $\bar{T}_{f,i}$, $\bar{\alpha}_i$, $\bar{C}_i$, and $\bar{c}_i$ that satisfy the nonlinear algebraic system. These steady values serve as the reference operating point for subsequent linear stability and time-domain simulations.
+
+\paragraph{2. Linear Stability Analysis}
+\textbf{Objective:} Identify the operating conditions under which the reactor transitions from stable to unstable behavior. Small perturbations $\delta \mathbf{x}_i(t)$ are introduced around the steady-state values $(\bar{n}_i, \bar{C}_i, \bar{T}_{f,i}, \bar{\alpha}_i, \bar{c}_i)$ obtained from the equilibrium analysis. Linearizing the nonlinear system equations in Section~\ref{sec:model} gives:
+\[
+\frac{d(\delta\mathbf{x})}{dt} = J_0 \delta\mathbf{x}(t) + J_1 \delta\mathbf{x}(t - \tau_{\mathrm{flow}}),
+\]
+where $\delta\mathbf{x} = [\delta n_i, \delta C_i, \delta T_{f,i}, \delta \alpha_i, \delta c_i]^{\top}$ represents small deviations in neutron population, precursor density, fuel temperature, void fraction, and control-rod position.
+
+The matrices $J_0$ and $J_1$ are the instantaneous and delayed Jacobians that quantify how each feedback term affects local stability. Their elements represent sensitivities such as:
+\begin{itemize}
+    \item $\partial \dot{n}_i / \partial n_j$, which captures neutron coupling ($D_n[n_j - n_i]$) and the sensitivity of reactivity $\rho_i$ to neutron changes;
+    \item $\partial \dot{T}_{f,i} / \partial n_i$ and $\partial \dot{n}_i / \partial T_{f,i}$, which together represent temperature--reactivity feedback through the Doppler effect;
+    \item $\partial \dot{\alpha}_i / \partial n_i$ and $\partial \dot{n}_i / \partial \alpha_i$, which link power, boiling, and void reactivity effects;
+    \item $\partial \dot{c}_i / \partial c_i$, which contributes the control-rod actuation lag; and
+    \item the delayed coupling $\partial \dot{\alpha}_U / \partial \alpha_L(t-\tau_{\mathrm{flow}})$, which enters $J_1$ and represents the time-lagged coolant transport between core regions.
+\end{itemize}
+
+Both Jacobian matrices will be computed symbolically in MATLAB using the \texttt{jacobian} function to avoid manual differentiation errors, and eigenvalues of the resulting characteristic matrix will be evaluated with \texttt{eig}. If any eigenvalue $\lambda$ has a positive real part, the equilibrium is unstable. The resulting eigenvalue spectrum will be used to construct a \textbf{stability map} showing regions of stable, oscillatory, and unstable operation as functions of power level, control-rod position, and void feedback strength.
+
+\paragraph{3. Nonlinear Time-Domain Simulation}
+\textbf{Objective:} Explore the full nonlinear dynamics of the two-region RBMK core model, including the delay term \(\alpha_L(t - \tau_{\mathrm{flow}})\).\\
+
+The coupled system of equations for 
+\[
+\{n_i(t),\,C_i(t),\,T_{f,i}(t),\,\alpha_i(t),\,c_i(t)\}, \quad i\in\{L,U\},
+\]
+is integrated using MATLAB’s \texttt{dde23} solver. This solver supports constant delays (such as \(\tau_{\mathrm{flow}}\)) by providing the delayed argument vector. The integration returns a solution with fields that correspond to the internal time grid and state values; subsequently allowing the \texttt{deval} function to be used to interpolate the solution at uniformly spaced time points for visualization and post-processing.\\
+
+This method keeps track of the system’s past states, which is important for capturing effects like delayed void transport, spatial coupling, neutron amplification, and rapid reactivity changes. For each simulation case, the solver records how power ($P_i \propto n_i$), axial offset ($\mathrm{AO}$), reactivity ($\rho_i(t)$), and related quantities such as $\frac{d\rho}{dt}$ change over time. Nonlinear behaviors such as power surges beyond stable limits, oscillating axial imbalance, and runaway power increases will be analyzed in the time domain and compared with stability map results.
+
+\subsection{Simulation Scenarios}
+Four simulation cases will be conducted:
+
+\begin{description}
+\item[Scenario A --- Stable High Power] Reactor at 50\% nominal power to confirm stability when Doppler feedback dominates.
+\item[Scenario B --- Unstable Low Power] Reactor at $\sim$7\% power to show self-amplifying oscillations from strong void feedback.
+\item[Scenario C --- Accident Simulation] Low-power startup followed by safety system initiation (slow rod insertion with graphite-tip pulse) to reproduce a rapid power excursion.
+\item[Scenario D --- Sensitivity Study] Parameter variations ($\kappa_{V,i}$, $\tau_c$, $\Delta\rho_{\mathrm{tip},0}$) to quantify effects on instability growth and peak power.
+\end{description}
+
+\subsection{Data Analysis}
+Simulation results will be processed using MATLAB’s \texttt{deval} function, which interpolates the solution data generated by \texttt{dde23} at specific time points.\\
+
+This ensures consistent resolution across all variables, allowing accurate comparison of fast and slow feedback effects.For each simulation, \texttt{deval} will be used to extract the time evolution of neutron density, fuel temperature, coolant void fraction, and reactivity at uniform intervals.
+These uniformly sampled datasets will be processed to compute derived metrics such as total core power, axial offset, and rate-of-change of reactivity.\\
+
+Visualization outputs will include:
+\begin{itemize}
+\item Time-series of neutron density, fuel temperature, void fraction, and total reactivity to show feedback timing and magnitude;
+\item Axial spatial power imbalance in the reactor core (upper vs.\ lower regions) to capture the development of spatial instability;
+\item Reactivity--power phase plots illustrating transitions between void-dominated and Doppler-dominated feedback regimes;
+\item Stability maps identifying boundaries between safe, oscillatory, and unstable operation regions based on eigenvalue analysis;
+\item Sensitivity plots showing how variations in key parameters ($\kappa_{V,i}$, $\tau_c$, $\Delta\rho_{\mathrm{tip},0}$) affect instability growth rate and peak power.
+\end{itemize}
+
+
+\bibliographystyle{plain}
+
+% The font size command is placed *inside* a group {} so it only affects the bibliography
+{
+\footnotesize % You can change this to \small or \scriptsize as desired
+\bibliography{references}
+}
+
+\end{document}
