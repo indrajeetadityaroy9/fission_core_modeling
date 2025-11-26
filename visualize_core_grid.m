@@ -3,13 +3,14 @@ function fig = visualize_core_grid(varargin)
 %
 %   fig = visualize_core_grid()
 %   fig = visualize_core_grid('animate', true)
-%   fig = visualize_core_grid('animate', true, 'rods_out', true)
+%   fig = visualize_core_grid('preset', 'high_power', 'animate', true)
 %
 %   Displays a cross-section view of the reactor core as a grid.
 %   Interleaving vertical rectangles of fuel rods and graphite moderators.
 %   Light blue squares represent coolant in fuel rod channels.
 %
 %   Optional Parameters:
+%       'preset'   - Configuration preset: 'default', 'high_power' (default: 'default')
 %       'animate'  - If true, runs neutron chain reaction animation (default: false)
 %       'rods_out' - If true, all control rods are lifted (no absorption),
 %                    disabling automatic control (default: false)
@@ -18,28 +19,26 @@ function fig = visualize_core_grid(varargin)
 %       fig - Figure handle
 
     % Parse optional parameters
-    p = inputParser;
-    addParameter(p, 'animate', false, @islogical);
-    addParameter(p, 'rods_out', false, @islogical);  % Lift all control rods (no absorption)
-    parse(p, varargin{:});
-    animate = p.Results.animate;
-    rods_out = p.Results.rods_out;
+    parser = inputParser;
+    addParameter(parser, 'preset', 'default', @ischar);
+    addParameter(parser, 'animate', false, @islogical);
+    addParameter(parser, 'rods_out', false, @islogical);  % Lift all control rods (no absorption)
+    parse(parser, varargin{:});
+    preset = parser.Results.preset;
+    animate = parser.Results.animate;
+    rods_out = parser.Results.rods_out;
 
-    % Grid dimensions (reduced for better chain reaction visibility)
-    n_rows = 24;
-    moderator_width = 2;   % Narrow moderator strips
-    fuel_width = 5;        % Fuel rod strips
-    n_fuel_strips = 4;     % Number of fuel rod regions
-    n_moderator_strips = 5; % Moderator on edges and between fuel
-    n_cols = n_fuel_strips * fuel_width + n_moderator_strips * moderator_width;  % 30 columns
+    % ========== LOAD CONFIGURATION PRESET ==========
+    cfg = get_preset_config(preset);
 
-    % Colors
-    color_coolant = [0.15 0.25 0.7];   % Dark blue - cold water coolant (fuel rod regions)
-    color_moderator = [0.85 0.85 0.85]; % Light gray - graphite moderator
-    color_edge = [0.5 0.5 0.5];        % Grid edge color
-    color_fuel_boundary = [0.8 0.2 0.1]; % Red - fuel rod boundary
-    color_uranium = [0.0 0.0 0.6];     % Dark blue - uranium fuel pellets
-    color_control_rod = [0.2 0.2 0.2]; % Dark gray/black - boron control rods
+    % ========== DERIVED VALUES ==========
+    n_rows = cfg.grid.n_rows;
+    n_fuel_strips = cfg.grid.n_fuel_strips;
+    n_moderator_strips = cfg.grid.n_moderator_strips;
+    n_cols = n_fuel_strips * cfg.grid.fuel_width + ...
+             n_moderator_strips * cfg.grid.moderator_width;  % 30 columns
+    moderator_width = cfg.grid.moderator_width;
+    fuel_width = cfg.grid.fuel_width;
 
     % Create a map: true = fuel rod (coolant), false = moderator
     fuel_map = false(n_rows, n_cols);
@@ -59,18 +58,23 @@ function fig = visualize_core_grid(varargin)
         end
     end
 
-    n_fuel_rods = 4;  % 4 fuel rod strips
+    n_fuel_rods = cfg.grid.n_fuel_strips;
 
     % Control rod positions (center of ALL moderator strips)
     % Moderator strips at: cols 1-2, 8-9, 15-16, 22-23, 29-30
     % Center x positions (0-indexed plot coords): 0.5, 7.5, 14.5, 21.5, 28.5
-    n_control_rods = 5;
+    n_control_rods = cfg.grid.n_moderator_strips;
     control_rod_cols = [0.5, 7.5, 14.5, 21.5, 28.5];  % Center x positions
-    control_rod_width = 0.8;  % Narrower than moderator cell
+    control_rod_width = cfg.fuel.control_rod_width;
+
+    % Rod position state (0 = fully raised, n_rows = fully inserted)
+    % Rods enter from top (y=0) and extend downward
     if rods_out
-        control_rod_inserted = false(n_control_rods, 1);  % All rods lifted (no absorption)
+        rod_position = zeros(n_control_rods, 1);    % All rods fully raised
+        rod_target = zeros(n_control_rods, 1);      % Target: stay raised
     else
-        control_rod_inserted = true(n_control_rods, 1);   % Start with all inserted
+        rod_position = n_rows * ones(n_control_rods, 1);  % All rods fully inserted
+        rod_target = n_rows * ones(n_control_rods, 1);    % Target: stay inserted
     end
 
     % Coolant state arrays (for fuel channel cells where fuel_map is true)
@@ -98,13 +102,13 @@ function fig = visualize_core_grid(varargin)
 
             % Color based on whether inside fuel rod region
             if fuel_map(row, col)
-                cell_color = color_coolant;
+                cell_color = cfg.colors.coolant;
             else
-                cell_color = color_moderator;
+                cell_color = cfg.colors.moderator;
             end
 
             cell_patches(row, col) = patch(x, y, cell_color, ...
-                  'EdgeColor', color_edge, ...
+                  'EdgeColor', cfg.colors.edge, ...
                   'LineWidth', 0.3);
         end
     end
@@ -115,23 +119,20 @@ function fig = visualize_core_grid(varargin)
         y_top = 0;
 
         rectangle('Position', [x_left, y_top, fuel_width, n_rows], ...
-                  'EdgeColor', color_fuel_boundary, ...
+                  'EdgeColor', cfg.colors.fuel_boundary, ...
                   'LineWidth', 2.5, ...
                   'LineStyle', '-');
     end
 
     % Draw control rods in moderator strips (boron absorbers)
+    % Height based on rod_position (0 = invisible, n_rows = full insertion)
     h_control_rods = gobjects(n_control_rods, 1);  % Graphics handles for dynamic updates
     for i = 1:n_control_rods
         x_left = control_rod_cols(i) - control_rod_width/2;
-        h_control_rods(i) = rectangle('Position', [x_left, 0, control_rod_width, n_rows], ...
-                                       'FaceColor', color_control_rod, ...
+        h_control_rods(i) = rectangle('Position', [x_left, 0, control_rod_width, rod_position(i)], ...
+                                       'FaceColor', cfg.colors.control_rod, ...
                                        'EdgeColor', 'k', ...
                                        'LineWidth', 1);
-        % Hide rod if rods_out mode (all rods lifted)
-        if rods_out
-            set(h_control_rods(i), 'Visible', 'off');
-        end
     end
 
     % Add uranium circles to all fuel rod cells
@@ -139,9 +140,8 @@ function fig = visualize_core_grid(varargin)
     % Dark blue circles = U-235 (active fissile material)
 
     rng(42);  % Fixed seed for reproducibility
-    u235_fraction = 0.35;     % 35% of fuel cells contain U-235 (high enrichment for demo)
-    pellet_radius = 0.35;     % Circle radius within unit square
-    color_u238 = [0.5 0.5 0.5];  % Grey - U-238 (fertile material)
+    u235_fraction = cfg.fuel.u235_fraction;
+    pellet_radius = cfg.fuel.pellet_radius;
 
     % Get all fuel cell positions
     [fuel_rows, fuel_cols] = find(fuel_map);
@@ -154,7 +154,13 @@ function fig = visualize_core_grid(varargin)
     u235_set(u235_indices) = true;
 
     % Draw circles for all fuel cells
+    % Store U-235 patch handles and ring handles for xenon poisoning visualization
+    u235_patches = gobjects(n_u235, 1);
+    u235_rings = gobjects(n_u235, 1);   % Ring indicators for xenon poisoning
+    u235_patch_idx = 1;
+
     theta = linspace(0, 2*pi, 30);
+    ring_radius = pellet_radius + 0.08;  % Ring slightly larger than pellet
     for i = 1:n_fuel_cells
         row = fuel_rows(i);
         col = fuel_cols(i);
@@ -169,13 +175,24 @@ function fig = visualize_core_grid(varargin)
 
         if u235_set(i)
             % U-235 (active fissile material) - dark blue
-            patch(rx, ry, color_uranium, ...
-                  'EdgeColor', color_uranium * 0.7, ...
+            u235_patches(u235_patch_idx) = patch(rx, ry, cfg.colors.uranium, ...
+                  'EdgeColor', cfg.colors.uranium * 0.7, ...
                   'LineWidth', 0.5);
+
+            % Draw xenon poisoning ring indicator (initially hidden)
+            ring_x = cx + ring_radius * cos(theta);
+            ring_y = cy + ring_radius * sin(theta);
+            u235_rings(u235_patch_idx) = patch(ring_x, ring_y, [1 1 1], ...
+                  'FaceColor', 'none', ...
+                  'EdgeColor', cfg.colors.xenon, ...
+                  'LineWidth', 2.5, ...
+                  'Visible', 'off');
+
+            u235_patch_idx = u235_patch_idx + 1;
         else
             % U-238 (fertile material) - grey
-            patch(rx, ry, color_u238, ...
-                  'EdgeColor', color_u238 * 0.7, ...
+            patch(rx, ry, cfg.colors.u238, ...
+                  'EdgeColor', cfg.colors.u238 * 0.7, ...
                   'LineWidth', 0.5);
         end
     end
@@ -191,6 +208,10 @@ function fig = visualize_core_grid(varargin)
             u235_idx = u235_idx + 1;
         end
     end
+
+    % Xenon-135 poisoning state (per U-235 site)
+    xenon_level = zeros(n_u235, 1);      % Poison level (0 = clean, 1 = fully poisoned)
+    u235_active = true(n_u235, 1);       % false = poisoned (no longer fissile)
 
     % Configure axes
     xlim([0, n_cols]);
@@ -211,12 +232,12 @@ function fig = visualize_core_grid(varargin)
     set(gca, 'FontSize', 10);
 
     % Add legend
-    h_coolant = patch(NaN, NaN, color_coolant, 'EdgeColor', color_edge);
-    h_moderator = patch(NaN, NaN, color_moderator, 'EdgeColor', color_edge);
-    h_u235 = patch(NaN, NaN, color_uranium, 'EdgeColor', color_uranium * 0.7);
-    h_u238 = patch(NaN, NaN, color_u238, 'EdgeColor', color_u238 * 0.7);
-    h_boundary = plot(NaN, NaN, '-', 'Color', color_fuel_boundary, 'LineWidth', 2.5);
-    h_control_legend = patch(NaN, NaN, color_control_rod, 'EdgeColor', 'k');
+    h_coolant = patch(NaN, NaN, cfg.colors.coolant, 'EdgeColor', cfg.colors.edge);
+    h_moderator = patch(NaN, NaN, cfg.colors.moderator, 'EdgeColor', cfg.colors.edge);
+    h_u235 = patch(NaN, NaN, cfg.colors.uranium, 'EdgeColor', cfg.colors.uranium * 0.7);
+    h_u238 = patch(NaN, NaN, cfg.colors.u238, 'EdgeColor', cfg.colors.u238 * 0.7);
+    h_boundary = plot(NaN, NaN, '-', 'Color', cfg.colors.fuel_boundary, 'LineWidth', 2.5);
+    h_control_legend = patch(NaN, NaN, cfg.colors.control_rod, 'EdgeColor', 'k');
 
     if animate
         % Include neutrons in legend when animating
@@ -247,31 +268,35 @@ function fig = visualize_core_grid(varargin)
     if animate
         fprintf('\nStarting neutron chain reaction animation...\n');
 
-        % Animation parameters
-        dt = 0.05;                    % Time step per frame
-        pause_time = 0.05;            % Pause between frames (slower = more visible)
-        neutron_speed = 2.5;          % Neutron speed (grid units/sec)
-        collision_radius = 0.35;      % Same as pellet_radius
-        max_neutrons = 150;           % Total neutron count limit for balance (increased)
-        n_frames = 800;               % Total animation frames
+        % Extract animation parameters from cfg
+        dt = cfg.anim.dt;
+        pause_time = cfg.anim.pause_time;
+        neutron_speed = cfg.anim.neutron_speed;
+        collision_radius = cfg.anim.collision_radius;
+        max_neutrons = cfg.anim.max_neutrons;
+        n_frames = cfg.anim.n_frames;
 
-        % Physics parameters
-        neutron_threshold = 80;       % Control rod threshold for automatic control (increased)
-
-        % Coolant temperature parameters
-        temp_baseline = 0.0;          % Cold water starting point
-        temp_evaporate = 0.92;        % Temperature at which water becomes void (high - requires sustained heating)
-        temp_condense = 0.25;         % Temperature below which void condenses back
-        heat_per_neutron = 0.03;      % Temperature increase per neutron interaction (gradual heating)
-        cooling_rate = 0.002;         % Background cooling per frame
-        max_coolant_absorption = 0.08; % Maximum absorption probability for cold water (reduced for demo)
+        % Extract physics parameters from cfg
+        neutron_threshold = cfg.physics.neutron_threshold;
+        temp_baseline = cfg.physics.temp_baseline;
+        temp_evaporate = cfg.physics.temp_evaporate;
+        temp_condense = cfg.physics.temp_condense;
+        heat_per_neutron = cfg.physics.heat_per_neutron;
+        cooling_rate = cfg.physics.cooling_rate;
+        max_coolant_absorption = cfg.physics.max_coolant_absorption;
+        xenon_per_fission = cfg.physics.xenon_per_fission;
+        xenon_threshold = cfg.physics.xenon_threshold;
+        xenon_decay_rate = cfg.physics.xenon_decay_rate;
+        spontaneous_fission_prob = cfg.physics.spontaneous_fission_prob;
 
         % Neutron balance tracking
         total_produced = 1;           % Start with 1 initial neutron
         total_absorbed_rods = 0;      % Absorbed by control rods
         total_absorbed_coolant = 0;   % Absorbed by water coolant
+        total_absorbed_xenon = 0;     % Absorbed by xenon-poisoned sites
         total_fissions = 0;           % Fission events
         total_escaped = 0;            % Escaped boundary
+        total_spontaneous = 0;        % Spontaneous fission neutrons
 
         % Neutron state arrays
         neutron_x = [];
@@ -315,30 +340,44 @@ function fig = visualize_core_grid(varargin)
 
         % Main animation loop
         for frame = 1:n_frames
-            % Step 0: Automatic control logic - adjust control rods based on neutron count
+            % Step 0: Automatic control logic - set target positions for control rods
             % (disabled when rods_out mode is active - all rods stay lifted)
             if ~rods_out
                 active_neutron_count = length(neutron_x);
 
                 if active_neutron_count < neutron_threshold
-                    % RAISE every second control rod (rods 2 and 4) to allow more fission
+                    % Set target to RAISED for alternating rods (2 and 4) to allow more fission
                     for j = 2:2:n_control_rods
-                        if control_rod_inserted(j)
-                            control_rod_inserted(j) = false;
-                            set(h_control_rods(j), 'Visible', 'off');
-                            fprintf('Rod %d RAISED (neutrons: %d < %d)\n', j, active_neutron_count, neutron_threshold);
+                        if rod_target(j) ~= 0
+                            rod_target(j) = 0;  % Target: fully raised
+                            fprintf('Rod %d RAISING (neutrons: %d < %d)\n', j, active_neutron_count, neutron_threshold);
                         end
                     end
                 elseif active_neutron_count > neutron_threshold
-                    % INSERT all control rods to suppress chain reaction
+                    % Set target to INSERTED for all rods to suppress chain reaction
                     for j = 1:n_control_rods
-                        if ~control_rod_inserted(j)
-                            control_rod_inserted(j) = true;
-                            set(h_control_rods(j), 'Visible', 'on');
-                            fprintf('Rod %d INSERTED (neutrons: %d > %d)\n', j, active_neutron_count, neutron_threshold);
+                        if rod_target(j) ~= n_rows
+                            rod_target(j) = n_rows;  % Target: fully inserted
+                            fprintf('Rod %d INSERTING (neutrons: %d > %d)\n', j, active_neutron_count, neutron_threshold);
                         end
                     end
                 end
+            end
+
+            % Step 0.25: Animate control rod movement toward target positions
+            rod_speed = cfg.anim.rod_speed;
+            for j = 1:n_control_rods
+                if rod_position(j) < rod_target(j)
+                    % Inserting (moving down into core)
+                    rod_position(j) = min(rod_target(j), rod_position(j) + rod_speed);
+                elseif rod_position(j) > rod_target(j)
+                    % Raising (withdrawing from core)
+                    rod_position(j) = max(rod_target(j), rod_position(j) - rod_speed);
+                end
+
+                % Update rectangle height (grows from top y=0 downward)
+                x_left = control_rod_cols(j) - control_rod_width/2;
+                set(h_control_rods(j), 'Position', [x_left, 0, control_rod_width, max(0.01, rod_position(j))]);
             end
 
             % Step 0.5: Background cooling for all coolant cells
@@ -380,14 +419,16 @@ function fig = visualize_core_grid(varargin)
                     continue;
                 end
 
-                % Check collision with control rods (100% absorption if inserted)
+                % Check collision with control rods (only in inserted portion)
                 absorbed_by_rod = false;
                 for j = 1:n_control_rods
-                    if control_rod_inserted(j)
+                    if rod_position(j) > 0
                         rod_x = control_rod_cols(j);
                         rod_half_width = control_rod_width / 2;
+                        % Absorb only if neutron is within rod's x-range AND y-range
                         if neutron_x(i) >= rod_x - rod_half_width && ...
-                           neutron_x(i) <= rod_x + rod_half_width
+                           neutron_x(i) <= rod_x + rod_half_width && ...
+                           neutron_y(i) <= rod_position(j)
                             remove(i) = true;
                             total_absorbed_rods = total_absorbed_rods + 1;
                             absorbed_by_rod = true;
@@ -428,18 +469,44 @@ function fig = visualize_core_grid(varargin)
                 dist = sqrt((u235_cx - neutron_x(i)).^2 + (u235_cy - neutron_y(i)).^2);
                 hit_idx = find(dist < collision_radius, 1);
 
-                % Only allow fission if under neutron limit (balance system)
-                current_count = length(neutron_x) - sum(remove) + length(new_x);
-                if ~isempty(hit_idx) && current_count < max_neutrons
-                    % Fission: spawn 3 neutrons
-                    [nx, ny, nvx, nvy] = spawn_neutrons(u235_cx(hit_idx), u235_cy(hit_idx), neutron_speed, 3);
-                    new_x = [new_x; nx];
-                    new_y = [new_y; ny];
-                    new_vx = [new_vx; nvx];
-                    new_vy = [new_vy; nvy];
-                    remove(i) = true;  % Remove triggering neutron
-                    total_fissions = total_fissions + 1;
-                    total_produced = total_produced + 3;
+                if ~isempty(hit_idx)
+                    if ~u235_active(hit_idx)
+                        % Poisoned site (xenon-135) - absorb neutron and burn off xenon
+                        remove(i) = true;
+                        total_absorbed_xenon = total_absorbed_xenon + 1;
+
+                        % Neutron absorption burns off xenon (Xe-135 + n -> Xe-136)
+                        xenon_level(hit_idx) = xenon_level(hit_idx) - xenon_per_fission * 2;
+
+                        % Check if site recovers from poisoning
+                        if xenon_level(hit_idx) < xenon_threshold * 0.5
+                            u235_active(hit_idx) = true;
+                            xenon_level(hit_idx) = max(0, xenon_level(hit_idx));
+                            set(u235_rings(hit_idx), 'Visible', 'off');  % Hide ring
+                        end
+                    else
+                        % Active site - fission if under neutron limit
+                        current_count = length(neutron_x) - sum(remove) + length(new_x);
+                        if current_count < max_neutrons
+                            % Fission: spawn 3 neutrons
+                            [nx, ny, nvx, nvy] = spawn_neutrons(u235_cx(hit_idx), u235_cy(hit_idx), neutron_speed, 3);
+                            new_x = [new_x; nx];
+                            new_y = [new_y; ny];
+                            new_vx = [new_vx; nvx];
+                            new_vy = [new_vy; nvy];
+                            remove(i) = true;  % Remove triggering neutron
+                            total_fissions = total_fissions + 1;
+                            total_produced = total_produced + 3;
+
+                            % Accumulate xenon from fission
+                            xenon_level(hit_idx) = xenon_level(hit_idx) + xenon_per_fission;
+
+                            % Check if site becomes poisoned
+                            if xenon_level(hit_idx) >= xenon_threshold
+                                u235_active(hit_idx) = false;
+                            end
+                        end
+                    end
                 end
             end
 
@@ -467,6 +534,19 @@ function fig = visualize_core_grid(varargin)
                 end
             end
 
+            % Step 3.5: Update U-235 colors for xenon poisoning
+            for i = 1:n_u235
+                % Optional: slow xenon decay (burnout) for active sites only
+                if xenon_level(i) > 0 && u235_active(i)
+                    xenon_level(i) = max(0, xenon_level(i) - xenon_decay_rate);
+                end
+
+                % Show xenon poisoning ring indicator for poisoned sites
+                if ~u235_active(i)
+                    set(u235_rings(i), 'Visible', 'on');
+                end
+            end
+
             % Step 4: Update neutron graphics
             if ~isempty(neutron_x)
                 set(h_neutrons, 'XData', neutron_x, 'YData', neutron_y);
@@ -476,44 +556,48 @@ function fig = visualize_core_grid(varargin)
             drawnow;
             pause(pause_time);
 
-            % End animation if no neutrons left - restart with new neutron
-            if isempty(neutron_x)
-                fprintf('All neutrons lost. Restarting with new neutron...\n');
-                target_idx = randi(n_u235);
-                target_x = u235_cx(target_idx);
-                target_y = u235_cy(target_idx);
-
-                neutron_x = [moderator_width + 0.5];  % Start inside first fuel rod
-                neutron_y = [target_y];
-
-                dx = target_x - neutron_x;
-                dy = target_y - neutron_y;
-                dist_to_target = sqrt(dx^2 + dy^2);
-
-                neutron_vx = [neutron_speed * (dx / dist_to_target)];
-                neutron_vy = [neutron_speed * (dy / dist_to_target)];
-
-                total_produced = total_produced + 1;  % Track restart neutron
+            % Spontaneous fission - background neutron source from fissile material
+            % This is physically accurate: U-235 undergoes spontaneous fission at a low rate
+            % Ensures the chain reaction never completely dies (as in real reactors)
+            if rand() < spontaneous_fission_prob && length(neutron_x) < max_neutrons
+                % Find active (non-poisoned) U-235 sites for spontaneous fission
+                active_sites = find(u235_active);
+                if ~isempty(active_sites)
+                    site_idx = active_sites(randi(length(active_sites)));
+                    [sx, sy, svx, svy] = spawn_neutrons(u235_cx(site_idx), u235_cy(site_idx), neutron_speed, 1);
+                    neutron_x = [neutron_x; sx];
+                    neutron_y = [neutron_y; sy];
+                    neutron_vx = [neutron_vx; svx];
+                    neutron_vy = [neutron_vy; svy];
+                    total_spontaneous = total_spontaneous + 1;
+                    total_produced = total_produced + 1;
+                end
             end
 
             % Progress indicator every 100 frames with balance info
             if mod(frame, 100) == 0
                 n_voids = sum(coolant_void(:));
-                fprintf('Frame %d/%d | Active: %d | Coolant: %d | Rods: %d | Voids: %d | Fissions: %d\n', ...
-                        frame, n_frames, length(neutron_x), total_absorbed_coolant, total_absorbed_rods, n_voids, total_fissions);
+                n_poisoned = sum(~u235_active);
+                fprintf('Frame %d/%d | Active: %d | Fissions: %d | Poisoned: %d/%d | Voids: %d\n', ...
+                        frame, n_frames, length(neutron_x), total_fissions, n_poisoned, n_u235, n_voids);
             end
         end
 
         % Final balance summary
         n_voids = sum(coolant_void(:));
+        n_poisoned = sum(~u235_active);
         fprintf('\n===== NEUTRON BALANCE SUMMARY =====\n');
         fprintf('Total produced:      %d\n', total_produced);
+        fprintf('  - From fission:    %d\n', total_fissions * 3);
+        fprintf('  - Spontaneous:     %d\n', total_spontaneous);
         fprintf('Absorbed (coolant):  %d\n', total_absorbed_coolant);
         fprintf('Absorbed (rods):     %d\n', total_absorbed_rods);
+        fprintf('Absorbed (xenon):    %d\n', total_absorbed_xenon);
         fprintf('Total escaped:       %d (left boundary)\n', total_escaped);
         fprintf('Total fissions:      %d\n', total_fissions);
         fprintf('Active remaining:    %d\n', length(neutron_x));
         fprintf('Void cells:          %d / %d (%.1f%%)\n', n_voids, n_fuel_cells, 100*n_voids/n_fuel_cells);
+        fprintf('Poisoned U-235:      %d / %d (%.1f%%)\n', n_poisoned, n_u235, 100*n_poisoned/n_u235);
         fprintf('Neutron limit:       %d (max allowed)\n', max_neutrons);
         fprintf('===================================\n');
         fprintf('Animation complete.\n');
@@ -575,4 +659,137 @@ function color = temp_to_color(temp)
         t = min(1, (temp - 0.67) / 0.33);
         color = (1-t) * [1.0, 0.6, 0.5] + t * [0.7, 0.15, 0.15];
     end
+end
+
+function cfg = get_preset_config(preset_name)
+%GET_PRESET_CONFIG Returns configuration struct for the specified preset
+%   preset_name - Name of preset: 'default', 'high_power'
+
+    switch preset_name
+        case 'default'
+            cfg = default_config();
+        case 'high_power'
+            cfg = high_power_config();
+        otherwise
+            warning('Unknown preset "%s", using default', preset_name);
+            cfg = default_config();
+    end
+end
+
+function cfg = default_config()
+%DEFAULT_CONFIG Standard configuration for demonstration/testing
+%   Moderate neutron activity, standard cooling, visible chain reaction
+
+    cfg = struct();
+
+    % --- Grid dimensions ---
+    cfg.grid.n_rows = 24;
+    cfg.grid.moderator_width = 2;
+    cfg.grid.fuel_width = 5;
+    cfg.grid.n_fuel_strips = 4;
+    cfg.grid.n_moderator_strips = 5;
+
+    % --- Colors ---
+    cfg.colors.coolant = [0.15 0.25 0.7];
+    cfg.colors.moderator = [0.85 0.85 0.85];
+    cfg.colors.edge = [0.5 0.5 0.5];
+    cfg.colors.fuel_boundary = [0.8 0.2 0.1];
+    cfg.colors.uranium = [0.0 0.0 0.6];
+    cfg.colors.u238 = [0.5 0.5 0.5];
+    cfg.colors.control_rod = [0.2 0.2 0.2];
+    cfg.colors.xenon = [1.0 0.5 0.0];
+
+    % --- Fuel configuration ---
+    cfg.fuel.u235_fraction = 0.35;
+    cfg.fuel.pellet_radius = 0.35;
+    cfg.fuel.control_rod_width = 0.8;
+
+    % --- Animation parameters ---
+    cfg.anim.dt = 0.05;
+    cfg.anim.pause_time = 0.05;
+    cfg.anim.neutron_speed = 2.5;
+    cfg.anim.collision_radius = 0.35;
+    cfg.anim.max_neutrons = 150;
+    cfg.anim.n_frames = 800;
+    cfg.anim.rod_speed = 0.5;           % Control rod movement speed (grid units/frame)
+
+    % --- Physics parameters ---
+    cfg.physics.neutron_threshold = 80;
+    cfg.physics.temp_baseline = 0.0;
+    cfg.physics.temp_evaporate = 0.92;
+    cfg.physics.temp_condense = 0.25;
+    cfg.physics.heat_per_neutron = 0.03;
+    cfg.physics.cooling_rate = 0.002;
+    cfg.physics.max_coolant_absorption = 0.005;  % Low per-frame rate (checked every frame)
+    cfg.physics.xenon_per_fission = 0.15;
+    cfg.physics.xenon_threshold = 1.0;
+    cfg.physics.xenon_decay_rate = 0.001;
+
+    % Spontaneous fission - background neutron source (always present in fissile material)
+    cfg.physics.spontaneous_fission_prob = 0.02;  % Probability per frame
+end
+
+function cfg = high_power_config()
+%HIGH_POWER_CONFIG Normal high-power operation (~3000 MW thermal)
+%   Dense neutron cloud, strong cooling flow, stable operation
+%   Simulates reactor functioning as designed with LAC system active
+
+    cfg = struct();
+
+    % --- Grid dimensions (Standard) ---
+    cfg.grid.n_rows = 24;
+    cfg.grid.moderator_width = 2;
+    cfg.grid.fuel_width = 5;
+    cfg.grid.n_fuel_strips = 4;
+    cfg.grid.n_moderator_strips = 5;
+
+    % --- Colors (Standard) ---
+    cfg.colors.coolant = [0.15 0.25 0.7];
+    cfg.colors.moderator = [0.85 0.85 0.85];
+    cfg.colors.edge = [0.5 0.5 0.5];
+    cfg.colors.fuel_boundary = [0.8 0.2 0.1];
+    cfg.colors.uranium = [0.0 0.0 0.6];
+    cfg.colors.u238 = [0.5 0.5 0.5];
+    cfg.colors.control_rod = [0.2 0.2 0.2];
+    cfg.colors.xenon = [1.0 0.5 0.0];
+
+    % --- Fuel configuration ---
+    cfg.fuel.u235_fraction = 0.35;
+    cfg.fuel.pellet_radius = 0.35;
+    cfg.fuel.control_rod_width = 0.8;
+
+    % --- Animation parameters (Optimized for High Activity) ---
+    cfg.anim.dt = 0.05;
+    cfg.anim.pause_time = 0.03;         % Faster animation speed
+    cfg.anim.neutron_speed = 3.0;       % Faster neutrons for high flux
+    cfg.anim.collision_radius = 0.35;
+    cfg.anim.max_neutrons = 300;        % HIGH LIMIT: Dense neutron cloud
+    cfg.anim.n_frames = 1000;
+    cfg.anim.rod_speed = 0.8;           % Faster rod movement for high-activity sim
+
+    % --- Physics parameters (STABLE HIGH-POWER REGIME) ---
+    % High threshold simulates operating at ~3000 MW thermal
+    cfg.physics.neutron_threshold = 180;
+
+    % Strong cooling capacity - heat removed quickly, prevents void formation
+    cfg.physics.cooling_rate = 0.009;
+
+    % Standard heat generation
+    cfg.physics.heat_per_neutron = 0.03;
+
+    % Thermal hydraulics - high pressure (7 MPa) keeps water liquid
+    cfg.physics.temp_baseline = 0.0;
+    cfg.physics.temp_evaporate = 0.95;
+    cfg.physics.temp_condense = 0.25;
+
+    % Water absorption provides negative reactivity feedback
+    cfg.physics.max_coolant_absorption = 0.008;  % Low per-frame rate (checked every frame)
+
+    % Xenon dynamics - high power burns off xenon (equilibrium)
+    cfg.physics.xenon_per_fission = 0.15;
+    cfg.physics.xenon_threshold = 1.0;
+    cfg.physics.xenon_decay_rate = 0.005;  % Fast decay (burnoff)
+
+    % Spontaneous fission - background neutron source
+    cfg.physics.spontaneous_fission_prob = 0.03;  % Slightly higher at high power
 end
