@@ -141,8 +141,9 @@ function fig = visualize_core_grid(varargin)
 
     % Draw circles for all fuel cells
     % Store U-235 patch handles and ring handles for xenon poisoning visualization
-    u235_patches = gobjects(n_u235, 1);
-    u235_rings   = gobjects(n_u235, 1);   % Ring indicators for xenon poisoning
+    u235_patches     = gobjects(n_u235, 1);
+    u235_rings       = gobjects(n_u235, 1);   % Ring indicators for xenon poisoning
+    u235_xe_overlays = gobjects(n_u235, 1);   % Xenon overlay patches
     u235_patch_idx = 1;
 
     theta       = linspace(0, 2*pi, 30);
@@ -165,6 +166,11 @@ function fig = visualize_core_grid(varargin)
             u235_patches(u235_patch_idx) = patch(rx, ry, cfg.colors.uranium, ...
                   'EdgeColor', cfg.colors.uranium * 0.7, ...
                   'LineWidth', 0.5);
+
+            % Xenon overlay: same footprint, starts transparent
+            u235_xe_overlays(u235_patch_idx) = patch(rx, ry, cfg.colors.xenon, ...
+                  'EdgeColor', 'none', ...
+                  'FaceAlpha', 0);
 
             % Draw xenon poisoning ring indicator (initially hidden)
             ring_x = cx + ring_radius * cos(theta);
@@ -195,6 +201,17 @@ function fig = visualize_core_grid(varargin)
             u235_idx = u235_idx + 1;
         end
     end
+    % KD-tree for fast nearest-neighbor queries against U-235 sites
+    u235_tree = createns([u235_cx, u235_cy], 'NSMethod', 'kdtree');
+
+    % Upper/lower region split (axial)
+    mid_row    = n_rows / 2;
+    upper_rows = 1:mid_row;
+    lower_rows = mid_row+1:n_rows;
+
+    % Optional: classify U-235 sites by region
+    idx_upper_u235 = find(u235_cy <= mid_row);
+    idx_lower_u235 = find(u235_cy >  mid_row);
 
     % Xenon-135 poisoning state (per U-235 site)
     xenon_level = zeros(n_u235, 1);  % Poison level (0 = clean, 1 = fully poisoned)
@@ -217,6 +234,15 @@ function fig = visualize_core_grid(varargin)
     set(gca, 'XTick', 0:5:n_cols, 'YTick', 0:6:n_rows);
     set(gca, 'TickDir', 'out');
     set(gca, 'FontSize', 10);
+
+    % Visual separator between upper and lower regions
+    sep_y = mid_row;
+    plot([0, n_cols], [sep_y, sep_y], '--', ...
+         'Color', [0.3 0.3 0.3], 'LineWidth', 1.2);
+    text(0.3, mid_row/2, ...
+         'Upper region', 'Color','k', 'FontSize',11, 'FontWeight','bold');
+    text(0.3, mid_row + (n_rows - mid_row)/2, ...
+         'Lower region', 'Color','k', 'FontSize',11, 'FontWeight','bold');
 
     % ========== NEUTRON CHAIN REACTION ANIMATION ==========
     fprintf('\nStarting neutron chain reaction animation...\n');
@@ -334,11 +360,11 @@ function fig = visualize_core_grid(varargin)
             % Update rectangle height (grows from top y=0 downward)
             x_left = control_rod_cols(j) - control_rod_width/2;
             set(h_control_rods(j), 'Position', [x_left, 0, control_rod_width, max(0.01, rod_position(j))]);
-        end
+            end
 
-        % Step 0.5: Background cooling for all coolant cells (once per frame)
-        for row = 1:n_rows
-            for col = 1:n_cols
+            % Step 0.5: Background cooling for all coolant cells (once per frame)
+            for row = 1:n_rows
+                for col = 1:n_cols
                 if fuel_map(row, col)
                     % Gradual cooling toward baseline
                     coolant_temp(row, col) = max(temp_baseline, ...
@@ -351,27 +377,67 @@ function fig = visualize_core_grid(varargin)
                     end
 
                     % Update density based on temperature (gradual reduction as heating)
-                    if ~coolant_void(row, col)
-                        coolant_density(row, col) = max(0, 1 - coolant_temp(row, col));
+                        if ~coolant_void(row, col)
+                            coolant_density(row, col) = max(0, 1 - coolant_temp(row, col));
+                        end
                     end
                 end
             end
-        end
 
-        % ===== SUB-STEPPED NEUTRON MOTION & COLLISIONS =====
-        for s = 1:substeps
+            % Step 0.6: Void convection (bubbles drift upward)
+            void_rise_prob = 0.7;
+            for col = 1:n_cols
+                for row = n_rows:-1:2  % bottom to top
+                    if ~fuel_map(row, col)
+                        continue;
+                    end
+                    if coolant_void(row, col) && ~coolant_void(row-1, col)
+                        if rand() < void_rise_prob
+                            % Swap states with cell above
+                            tmp_void       = coolant_void(row-1, col);
+                            tmp_temp       = coolant_temp(row-1, col);
+                            tmp_density    = coolant_density(row-1, col);
+
+                            coolant_void(row-1, col)    = coolant_void(row, col);
+                            coolant_temp(row-1, col)    = coolant_temp(row, col);
+                            coolant_density(row-1, col) = coolant_density(row, col);
+
+                            coolant_void(row, col)    = tmp_void;
+                            coolant_temp(row, col)    = tmp_temp;
+                            coolant_density(row, col) = tmp_density;
+                        end
+                    end
+                end
+            end
+
+            % Remove voids that reach the very top (leave the core)
+            for col = 1:n_cols
+                if fuel_map(1, col) && coolant_void(1, col)
+                    coolant_void(1, col)    = false;
+                    coolant_density(1, col) = 1.0;
+                    coolant_temp(1, col)    = temp_baseline;
+                end
+            end
+
+            % ===== SUB-STEPPED NEUTRON MOTION & COLLISIONS =====
+            for s = 1:substeps
             % Step 1: Move neutrons (smaller sub-step)
             neutron_x = neutron_x + neutron_vx * sub_dt;
             neutron_y = neutron_y + neutron_vy * sub_dt;
 
-            % Step 2: Check collisions and handle physics for this sub-step
-            new_x = []; new_y = []; new_vx = []; new_vy = [];
-            remove = false(size(neutron_x));
+                % Step 2: Check collisions and handle physics for this sub-step
+                new_x = []; new_y = []; new_vx = []; new_vy = [];
+                remove = false(size(neutron_x));
+                if isempty(neutron_x)
+                    u235_neighbors = cell(0, 1);
+                else
+                    u235_neighbors = rangesearch(u235_tree, [neutron_x(:) neutron_y(:)], collision_radius);
+                end
 
-            for i = 1:length(neutron_x)
-                % Check if out of bounds - remove neutron (escaped)
-                if neutron_x(i) < 0 || neutron_x(i) > n_cols || ...
-                   neutron_y(i) < 0 || neutron_y(i) > n_rows
+                for i = 1:length(neutron_x)
+                    % Check if out of bounds - remove neutron (escaped)
+                    if neutron_x(i) < 0 || neutron_x(i) > n_cols || ...
+                       neutron_y(i) < 0 || neutron_y(i) > n_rows
                     remove(i) = true;
                     total_escaped = total_escaped + 1;
                     continue;
@@ -439,18 +505,14 @@ function fig = visualize_core_grid(varargin)
             end
         end
 
-                % Check collision with U-235 (any neutron can cause fission)
-                dx_u = u235_cx - neutron_x(i);
-                dy_u = u235_cy - neutron_y(i);
-                dist = hypot(dx_u, dy_u);  % Use hypot for stable distance
-
-                hit_idx = find(dist < collision_radius, 1);
-
-                if ~isempty(hit_idx)
-                    if ~u235_active(hit_idx)
-                        % Poisoned site (xenon-135) - absorb neutron and burn off xenon
-                        remove(i) = true;
-                        total_absorbed_xenon = total_absorbed_xenon + 1;
+                    % Check collision with U-235 (any neutron can cause fission)
+                    hit_candidates = u235_neighbors{i};
+                    if ~isempty(hit_candidates)
+                        hit_idx = hit_candidates(1);  % Take first nearby site
+                        if ~u235_active(hit_idx)
+                            % Poisoned site (xenon-135) - absorb neutron and burn off xenon
+                            remove(i) = true;
+                            total_absorbed_xenon = total_absorbed_xenon + 1;
 
                         % Neutron absorption burns off xenon (Xe-135 + n -> Xe-136)
                         xenon_level(hit_idx) = xenon_level(hit_idx) - xenon_per_fission * 2;
@@ -520,12 +582,11 @@ function fig = visualize_core_grid(varargin)
                 xenon_level(i) = max(0, xenon_level(i) - xenon_decay_rate);
             end
 
-            % Fade pellet color based on xenon buildup (0 = clean, 1 = fully poisoned)
-            poison_frac     = min(1.0, xenon_level(i) / xenon_threshold);
-            healthy_color   = cfg.colors.uranium;
-            poisoned_color  = cfg.colors.xenon;
-            new_color       = (1 - poison_frac) * healthy_color + poison_frac * poisoned_color;
-            set(u235_patches(i), 'FaceColor', new_color);
+            % Xenon overlay opacity based on poisoning (0 = clean, 1 = fully poisoned)
+            poison_frac = min(1.0, xenon_level(i) / xenon_threshold);
+            alpha_max   = 0.85;
+            xe_alpha    = poison_frac * alpha_max;
+            set(u235_xe_overlays(i), 'FaceAlpha', xe_alpha);
 
             % Rings remain as a binary indicator for fully poisoned sites
             if ~u235_active(i)
@@ -564,8 +625,16 @@ function fig = visualize_core_grid(varargin)
         if mod(frame, 100) == 0
             n_voids    = sum(coolant_void(:));
             n_poisoned = sum(~u235_active);
-            fprintf('Frame %d/%d | Active: %d | Fissions: %d | Poisoned: %d/%d | Voids: %d\n', ...
-                    frame, n_frames, length(neutron_x), total_fissions, n_poisoned, n_u235, n_voids);
+
+            voids_upper = sum(sum(coolant_void(upper_rows, :) & fuel_map(upper_rows, :)));
+            voids_lower = sum(sum(coolant_void(lower_rows, :) & fuel_map(lower_rows, :)));
+
+            fprintf(['Frame %d/%d | Active: %d | Fissions: %d | ', ...
+                     'Voids=%d (U=%d, L=%d) | Poisoned: %d/%d\n'], ...
+                    frame, n_frames, length(neutron_x), ...
+                    total_fissions, ...
+                    n_voids, voids_upper, voids_lower, ...
+                    n_poisoned, n_u235);
         end
     end
 
@@ -729,4 +798,7 @@ function cfg = high_power_config()
 
     % Spontaneous fission - background neutron source
     cfg.physics.spontaneous_fission_prob = 0.03;  % Slightly higher at high power
+
+    % Void handling: allow visualization of upward drift (do not clear immediately)
+    cfg.physics.clear_void_immediately = false;
 end
