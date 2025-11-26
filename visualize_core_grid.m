@@ -34,7 +34,7 @@ function fig = visualize_core_grid(varargin)
     n_cols = n_fuel_strips * fuel_width + n_moderator_strips * moderator_width;  % 30 columns
 
     % Colors
-    color_coolant = [0.7 0.85 1.0];    % Light blue - water coolant (fuel rod regions)
+    color_coolant = [0.15 0.25 0.7];   % Dark blue - cold water coolant (fuel rod regions)
     color_moderator = [0.85 0.85 0.85]; % Light gray - graphite moderator
     color_edge = [0.5 0.5 0.5];        % Grid edge color
     color_fuel_boundary = [0.8 0.2 0.1]; % Red - fuel rod boundary
@@ -73,6 +73,11 @@ function fig = visualize_core_grid(varargin)
         control_rod_inserted = true(n_control_rods, 1);   % Start with all inserted
     end
 
+    % Coolant state arrays (for fuel channel cells where fuel_map is true)
+    coolant_temp = zeros(n_rows, n_cols);      % Temperature (0 = cold, 1 = boiling)
+    coolant_density = ones(n_rows, n_cols);    % Density (1 = liquid, 0 = void/steam)
+    coolant_void = false(n_rows, n_cols);      % True when evaporated
+
     % Create figure (sized for smaller grid)
     fig = figure('Name', 'RBMK-1000 Core Cross-Section', ...
                  'NumberTitle', 'off', ...
@@ -83,7 +88,8 @@ function fig = visualize_core_grid(varargin)
     axis equal;
     axis tight;
 
-    % Draw all grid squares
+    % Draw all grid squares and store patch handles for dynamic updates
+    cell_patches = gobjects(n_rows, n_cols);
     for row = 1:n_rows
         for col = 1:n_cols
             % Define square vertices
@@ -97,7 +103,7 @@ function fig = visualize_core_grid(varargin)
                 cell_color = color_moderator;
             end
 
-            patch(x, y, cell_color, ...
+            cell_patches(row, col) = patch(x, y, cell_color, ...
                   'EdgeColor', color_edge, ...
                   'LineWidth', 0.3);
         end
@@ -133,7 +139,7 @@ function fig = visualize_core_grid(varargin)
     % Dark blue circles = U-235 (active fissile material)
 
     rng(42);  % Fixed seed for reproducibility
-    u235_fraction = 0.25;     % 25% of fuel cells contain U-235 (higher enrichment)
+    u235_fraction = 0.35;     % 35% of fuel cells contain U-235 (high enrichment for demo)
     pellet_radius = 0.35;     % Circle radius within unit square
     color_u238 = [0.5 0.5 0.5];  % Grey - U-238 (fertile material)
 
@@ -213,18 +219,16 @@ function fig = visualize_core_grid(varargin)
     h_control_legend = patch(NaN, NaN, color_control_rod, 'EdgeColor', 'k');
 
     if animate
-        % Include neutrons (fast and thermal) in legend when animating
-        h_fast_legend = scatter(NaN, NaN, 30, 'r', 'filled');
-        h_thermal_legend = scatter(NaN, NaN, 30, 'k', 'filled');
-        legend([h_boundary, h_coolant, h_moderator, h_u235, h_u238, h_control_legend, h_fast_legend, h_thermal_legend], ...
+        % Include neutrons in legend when animating
+        h_neutron_legend = scatter(NaN, NaN, 30, 'k', 'filled');
+        legend([h_boundary, h_coolant, h_moderator, h_u235, h_u238, h_control_legend, h_neutron_legend], ...
                {sprintf('Fuel Rod Boundary (%d rods)', n_fuel_rods), ...
                 'Light Water Coolant', ...
-                'Graphite Moderator (slows neutrons)', ...
+                'Graphite Moderator', ...
                 sprintf('U-235 Fissile (%d)', n_u235), ...
                 sprintf('U-238 Fertile (%d)', n_fuel_cells - n_u235), ...
                 sprintf('Control Rods (%d, boron)', n_control_rods), ...
-                'Fast Neutrons', ...
-                'Thermal Neutrons'}, ...
+                'Neutrons'}, ...
                'Location', 'northeastoutside', ...
                'FontSize', 9);
     else
@@ -246,36 +250,39 @@ function fig = visualize_core_grid(varargin)
         % Animation parameters
         dt = 0.05;                    % Time step per frame
         pause_time = 0.05;            % Pause between frames (slower = more visible)
-        fast_neutron_speed = 4.0;     % Fast neutrons from fission (grid units/sec)
-        thermal_neutron_speed = 1.5;  % Slowed thermal neutrons (grid units/sec)
+        neutron_speed = 2.5;          % Neutron speed (grid units/sec)
         collision_radius = 0.35;      % Same as pellet_radius
         max_neutrons = 150;           % Total neutron count limit for balance (increased)
         n_frames = 800;               % Total animation frames
 
         % Physics parameters
-        thermalization_prob = 0.5;    % 50% chance per frame to slow down in moderator (faster)
         neutron_threshold = 80;       % Control rod threshold for automatic control (increased)
+
+        % Coolant temperature parameters
+        temp_baseline = 0.0;          % Cold water starting point
+        temp_evaporate = 0.92;        % Temperature at which water becomes void (high - requires sustained heating)
+        temp_condense = 0.25;         % Temperature below which void condenses back
+        heat_per_neutron = 0.03;      % Temperature increase per neutron interaction (gradual heating)
+        cooling_rate = 0.002;         % Background cooling per frame
+        max_coolant_absorption = 0.08; % Maximum absorption probability for cold water (reduced for demo)
 
         % Neutron balance tracking
         total_produced = 1;           % Start with 1 initial neutron
         total_absorbed_rods = 0;      % Absorbed by control rods
+        total_absorbed_coolant = 0;   % Absorbed by water coolant
         total_fissions = 0;           % Fission events
         total_escaped = 0;            % Escaped boundary
-        total_thermalized = 0;        % Fast → thermal conversions
 
-        % Neutron state arrays (extended with thermal state)
+        % Neutron state arrays
         neutron_x = [];
         neutron_y = [];
         neutron_vx = [];
         neutron_vy = [];
-        neutron_thermal = [];  % false = fast, true = thermal
 
-        % Create two scatter plots for neutrons (fast = red, thermal = black)
-        h_fast_neutrons = scatter([], [], 30, 'r', 'filled');
-        h_thermal_neutrons = scatter([], [], 30, 'k', 'filled');
+        % Create scatter plot for neutrons
+        h_neutrons = scatter([], [], 30, 'k', 'filled');
 
-        % Start with a single THERMAL neutron aimed at a random U-235 cell
-        % (thermal so it can immediately cause fission)
+        % Start with a single neutron aimed at a random U-235 cell
         target_idx = randi(n_u235);             % Pick a random U-235 as target
         target_x = u235_cx(target_idx);
         target_y = u235_cy(target_idx);
@@ -284,23 +291,22 @@ function fig = visualize_core_grid(varargin)
         % Use column vectors for all neutron state arrays
         neutron_x = [moderator_width + 0.5];    % Start inside first fuel rod
         neutron_y = [target_y];                 % Align with target U-235 vertically
-        neutron_thermal = [true];               % Start as thermal (can cause fission)
 
-        % Calculate direction toward target at thermal speed
+        % Calculate direction toward target
         dx = target_x - neutron_x;
         dy = target_y - neutron_y;
         dist_to_target = sqrt(dx^2 + dy^2);
 
         if dist_to_target > 0
-            neutron_vx = [thermal_neutron_speed * (dx / dist_to_target)];
-            neutron_vy = [thermal_neutron_speed * (dy / dist_to_target)];
+            neutron_vx = [neutron_speed * (dx / dist_to_target)];
+            neutron_vy = [neutron_speed * (dy / dist_to_target)];
         else
             % Target is in same column, move right
-            neutron_vx = [thermal_neutron_speed];
+            neutron_vx = [neutron_speed];
             neutron_vy = [0];
         end
 
-        fprintf('Initial THERMAL neutron starting in fuel rod, aimed at U-235 at (%.1f, %.1f)\n', target_x, target_y);
+        fprintf('Initial neutron starting in fuel rod, aimed at U-235 at (%.1f, %.1f)\n', target_x, target_y);
         if rods_out
             fprintf('Control rods: ALL %d LIFTED (rods_out mode - no absorption)\n', n_control_rods);
         else
@@ -335,12 +341,34 @@ function fig = visualize_core_grid(varargin)
                 end
             end
 
+            % Step 0.5: Background cooling for all coolant cells
+            for row = 1:n_rows
+                for col = 1:n_cols
+                    if fuel_map(row, col)
+                        % Gradual cooling toward baseline
+                        coolant_temp(row, col) = max(temp_baseline, ...
+                            coolant_temp(row, col) - cooling_rate);
+
+                        % Check for condensation (void → liquid)
+                        if coolant_void(row, col) && coolant_temp(row, col) < temp_condense
+                            coolant_void(row, col) = false;
+                            coolant_density(row, col) = 1.0;
+                        end
+
+                        % Update density based on temperature (gradual reduction as heating)
+                        if ~coolant_void(row, col)
+                            coolant_density(row, col) = max(0, 1 - coolant_temp(row, col));
+                        end
+                    end
+                end
+            end
+
             % Step 1: Move neutrons (smooth sub-step movement)
             neutron_x = neutron_x + neutron_vx * dt;
             neutron_y = neutron_y + neutron_vy * dt;
 
             % Step 2: Check collisions and handle physics
-            new_x = []; new_y = []; new_vx = []; new_vy = []; new_thermal = [];
+            new_x = []; new_y = []; new_vx = []; new_vy = [];
             remove = false(size(neutron_x));
 
             for i = 1:length(neutron_x)
@@ -375,41 +403,43 @@ function fig = visualize_core_grid(varargin)
                 cell_col = max(1, min(n_cols, floor(neutron_x(i)) + 1));
                 cell_row = max(1, min(n_rows, floor(neutron_y(i)) + 1));
 
-                % Check if in moderator region - SLOW fast neutrons (don't absorb)
-                if ~fuel_map(cell_row, cell_col) && ~neutron_thermal(i)
-                    % Fast neutron in graphite - chance to thermalize
-                    if rand() < thermalization_prob
-                        neutron_thermal(i) = true;
-                        total_thermalized = total_thermalized + 1;
-                        % Reduce speed to thermal speed (preserve direction)
-                        current_speed = sqrt(neutron_vx(i)^2 + neutron_vy(i)^2);
-                        if current_speed > 0
-                            scale = thermal_neutron_speed / current_speed;
-                            neutron_vx(i) = neutron_vx(i) * scale;
-                            neutron_vy(i) = neutron_vy(i) * scale;
-                        end
+                % Check if in fuel channel (coolant) - heat water and maybe absorb
+                if fuel_map(cell_row, cell_col) && ~coolant_void(cell_row, cell_col)
+                    % Neutron is in liquid coolant - heat the water
+                    coolant_temp(cell_row, cell_col) = min(1.0, ...
+                        coolant_temp(cell_row, cell_col) + heat_per_neutron);
+
+                    % Check for evaporation
+                    if coolant_temp(cell_row, cell_col) >= temp_evaporate
+                        coolant_void(cell_row, cell_col) = true;
+                        coolant_density(cell_row, cell_col) = 0;
+                    end
+
+                    % Absorption probability based on current density
+                    absorption_prob = max_coolant_absorption * coolant_density(cell_row, cell_col);
+                    if rand() < absorption_prob
+                        remove(i) = true;
+                        total_absorbed_coolant = total_absorbed_coolant + 1;
+                        continue;
                     end
                 end
 
-                % Check collision with U-235 (ONLY thermal neutrons can cause fission)
-                if neutron_thermal(i)
-                    dist = sqrt((u235_cx - neutron_x(i)).^2 + (u235_cy - neutron_y(i)).^2);
-                    hit_idx = find(dist < collision_radius, 1);
+                % Check collision with U-235 (any neutron can cause fission)
+                dist = sqrt((u235_cx - neutron_x(i)).^2 + (u235_cy - neutron_y(i)).^2);
+                hit_idx = find(dist < collision_radius, 1);
 
-                    % Only allow fission if under neutron limit (balance system)
-                    current_count = length(neutron_x) - sum(remove) + length(new_x);
-                    if ~isempty(hit_idx) && current_count < max_neutrons
-                        % Fission: spawn 3 FAST neutrons
-                        [nx, ny, nvx, nvy] = spawn_neutrons(u235_cx(hit_idx), u235_cy(hit_idx), fast_neutron_speed, 3);
-                        new_x = [new_x; nx];
-                        new_y = [new_y; ny];
-                        new_vx = [new_vx; nvx];
-                        new_vy = [new_vy; nvy];
-                        new_thermal = [new_thermal; false(3,1)];  % New neutrons are FAST
-                        remove(i) = true;  % Remove triggering neutron
-                        total_fissions = total_fissions + 1;
-                        total_produced = total_produced + 3;
-                    end
+                % Only allow fission if under neutron limit (balance system)
+                current_count = length(neutron_x) - sum(remove) + length(new_x);
+                if ~isempty(hit_idx) && current_count < max_neutrons
+                    % Fission: spawn 3 neutrons
+                    [nx, ny, nvx, nvy] = spawn_neutrons(u235_cx(hit_idx), u235_cy(hit_idx), neutron_speed, 3);
+                    new_x = [new_x; nx];
+                    new_y = [new_y; ny];
+                    new_vx = [new_vx; nvx];
+                    new_vy = [new_vy; nvy];
+                    remove(i) = true;  % Remove triggering neutron
+                    total_fissions = total_fissions + 1;
+                    total_produced = total_produced + 3;
                 end
             end
 
@@ -420,63 +450,71 @@ function fig = visualize_core_grid(varargin)
             neutron_y = [neutron_y(keep_idx); new_y(:)];
             neutron_vx = [neutron_vx(keep_idx); new_vx(:)];
             neutron_vy = [neutron_vy(keep_idx); new_vy(:)];
-            neutron_thermal = [neutron_thermal(keep_idx); new_thermal(:)];
 
-            % Step 3: Update graphics (separate fast and thermal neutrons)
+            % Step 3: Update coolant cell colors based on temperature
+            for row = 1:n_rows
+                for col = 1:n_cols
+                    if fuel_map(row, col)
+                        if coolant_void(row, col)
+                            % Void cell - make transparent/white
+                            set(cell_patches(row, col), 'FaceColor', [1 1 1], 'FaceAlpha', 0.3);
+                        else
+                            % Liquid coolant - color based on temperature
+                            new_color = temp_to_color(coolant_temp(row, col));
+                            set(cell_patches(row, col), 'FaceColor', new_color, 'FaceAlpha', 1.0);
+                        end
+                    end
+                end
+            end
+
+            % Step 4: Update neutron graphics
             if ~isempty(neutron_x)
-                fast_idx = find(~neutron_thermal);
-                thermal_idx = find(neutron_thermal);
-                set(h_fast_neutrons, 'XData', neutron_x(fast_idx), 'YData', neutron_y(fast_idx));
-                set(h_thermal_neutrons, 'XData', neutron_x(thermal_idx), 'YData', neutron_y(thermal_idx));
+                set(h_neutrons, 'XData', neutron_x, 'YData', neutron_y);
             else
-                set(h_fast_neutrons, 'XData', [], 'YData', []);
-                set(h_thermal_neutrons, 'XData', [], 'YData', []);
+                set(h_neutrons, 'XData', [], 'YData', []);
             end
             drawnow;
             pause(pause_time);
 
-            % End animation if no neutrons left - restart with new thermal neutron
+            % End animation if no neutrons left - restart with new neutron
             if isempty(neutron_x)
-                fprintf('All neutrons lost. Restarting with new thermal neutron...\n');
+                fprintf('All neutrons lost. Restarting with new neutron...\n');
                 target_idx = randi(n_u235);
                 target_x = u235_cx(target_idx);
                 target_y = u235_cy(target_idx);
 
                 neutron_x = [moderator_width + 0.5];  % Start inside first fuel rod
                 neutron_y = [target_y];
-                neutron_thermal = [true];             % Start as thermal
 
                 dx = target_x - neutron_x;
                 dy = target_y - neutron_y;
                 dist_to_target = sqrt(dx^2 + dy^2);
 
-                neutron_vx = [thermal_neutron_speed * (dx / dist_to_target)];
-                neutron_vy = [thermal_neutron_speed * (dy / dist_to_target)];
+                neutron_vx = [neutron_speed * (dx / dist_to_target)];
+                neutron_vy = [neutron_speed * (dy / dist_to_target)];
 
                 total_produced = total_produced + 1;  % Track restart neutron
             end
 
             % Progress indicator every 100 frames with balance info
             if mod(frame, 100) == 0
-                n_fast = sum(~neutron_thermal);
-                n_thermal = sum(neutron_thermal);
-                fprintf('Frame %d/%d | Active: %d (Fast:%d Thermal:%d) | Rod absorbed: %d | Fissions: %d\n', ...
-                        frame, n_frames, length(neutron_x), n_fast, n_thermal, total_absorbed_rods, total_fissions);
+                n_voids = sum(coolant_void(:));
+                fprintf('Frame %d/%d | Active: %d | Coolant: %d | Rods: %d | Voids: %d | Fissions: %d\n', ...
+                        frame, n_frames, length(neutron_x), total_absorbed_coolant, total_absorbed_rods, n_voids, total_fissions);
             end
         end
 
         % Final balance summary
-        n_fast = sum(~neutron_thermal);
-        n_thermal = sum(neutron_thermal);
+        n_voids = sum(coolant_void(:));
         fprintf('\n===== NEUTRON BALANCE SUMMARY =====\n');
         fprintf('Total produced:      %d\n', total_produced);
-        fprintf('Total absorbed:      %d (by control rods)\n', total_absorbed_rods);
+        fprintf('Absorbed (coolant):  %d\n', total_absorbed_coolant);
+        fprintf('Absorbed (rods):     %d\n', total_absorbed_rods);
         fprintf('Total escaped:       %d (left boundary)\n', total_escaped);
         fprintf('Total fissions:      %d\n', total_fissions);
-        fprintf('Total thermalized:   %d (fast → thermal)\n', total_thermalized);
-        fprintf('Active remaining:    %d (Fast: %d, Thermal: %d)\n', length(neutron_x), n_fast, n_thermal);
+        fprintf('Active remaining:    %d\n', length(neutron_x));
+        fprintf('Void cells:          %d / %d (%.1f%%)\n', n_voids, n_fuel_cells, 100*n_voids/n_fuel_cells);
         fprintf('Neutron limit:       %d (max allowed)\n', max_neutrons);
-        fprintf('Control threshold:   %d neutrons\n', neutron_threshold);
         fprintf('===================================\n');
         fprintf('Animation complete.\n');
     end
@@ -512,4 +550,29 @@ function [x, y, vx, vy] = spawn_neutrons(cx, cy, speed, count)
     % Velocity in the same direction as spawn offset
     vx = speed * cos(angles);
     vy = speed * sin(angles);
+end
+
+function color = temp_to_color(temp)
+%TEMP_TO_COLOR Maps coolant temperature to blue-red spectrum
+%   temp - Temperature value (0 = cold, 1 = boiling)
+%
+%   Color spectrum (blue to red):
+%   Cold (0.0)    = Dark blue [0.15, 0.25, 0.7]
+%   Cool (0.33)   = Light blue [0.5, 0.7, 1.0]
+%   Warm (0.67)   = Light red [1.0, 0.6, 0.5]
+%   Hot (1.0)     = Dark red [0.7, 0.15, 0.15]
+
+    if temp < 0.33
+        % Cold: dark blue → light blue
+        t = temp / 0.33;
+        color = (1-t) * [0.15, 0.25, 0.7] + t * [0.5, 0.7, 1.0];
+    elseif temp < 0.67
+        % Transition: light blue → light red
+        t = (temp - 0.33) / 0.34;
+        color = (1-t) * [0.5, 0.7, 1.0] + t * [1.0, 0.6, 0.5];
+    else
+        % Hot: light red → dark red
+        t = min(1, (temp - 0.67) / 0.33);
+        color = (1-t) * [1.0, 0.6, 0.5] + t * [0.7, 0.15, 0.15];
+    end
 end
