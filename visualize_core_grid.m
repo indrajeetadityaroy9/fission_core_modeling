@@ -287,12 +287,12 @@ function state = init_reactor_state(preset, initial_power, params, grid, orm_lev
     state.alpha_U = alpha_eq;
 
     % Fuel temperature at equilibrium
-    state.Tf_L = p.Tf0 + p.a_f * initial_power;
-    state.Tf_U = p.Tf0 + p.a_f * initial_power;
+    state.Tf_L = p.T0 + p.a_f * initial_power;
+    state.Tf_U = p.T0 + p.a_f * initial_power;
 
-    % Moderator temperature (graphite) - start near reference Tm0
-    state.Tm_L = p.Tm0;
-    state.Tm_U = p.Tm0;
+    % Moderator temperature (graphite) - start near reference T0
+    state.Tm_L = p.Tc;
+    state.Tm_U = p.Tc;
 
     % Xenon/Iodine at equilibrium
     n_init = (state.n_L + state.n_U) / 2;
@@ -472,51 +472,27 @@ function [state, rho] = update_reactor_physics(state, params, grid, dt)
     rho.void_L = p.kappa_V * alpha_L;
     rho.void_U = p.kappa_V * alpha_U;
 
-    % B. Doppler feedback (with power-dependent enhancement)
-    rho_dop_base_L = p.kappa_D0 * (sqrt(Tf_L) - sqrt(p.Tf0));
-    rho_dop_base_U = p.kappa_D0 * (sqrt(Tf_U) - sqrt(p.Tf0));
-    power_frac_L = n_L;
-    power_frac_U = n_U;
-    if isfield(p, 'doppler_enhancement')
-        doppler_mult_L = 1.0 + (p.doppler_enhancement - 1.0) * power_frac_L;
-        doppler_mult_U = 1.0 + (p.doppler_enhancement - 1.0) * power_frac_U;
-    else
-        doppler_mult_L = 1.0;
-        doppler_mult_U = 1.0;
-    end
-    rho.dop_L = rho_dop_base_L * doppler_mult_L;
-    rho.dop_U = rho_dop_base_U * doppler_mult_U;
+    % B. Doppler feedback (simple √T law per LaTeX model)
+    rho.dop_L = p.kappa_D * (sqrt(Tf_L) - sqrt(p.T0));
+    rho.dop_U = p.kappa_D * (sqrt(Tf_U) - sqrt(p.T0));
 
-    % C. Moderator (graphite) temperature feedback
-    rho_mod_L = p.kappa_M0 * (Tm_L - p.Tm0);
-    rho_mod_U = p.kappa_M0 * (Tm_U - p.Tm0);
-
-    % D. Xenon-135 feedback
+    % C. Xenon-135 feedback
     rho.xen_L = -p.kappa_X * X_L;
     rho.xen_U = -p.kappa_X * X_U;
 
-    % E. Control rod reactivity (boron + graphite followers)
-    rho_boron_L = -(p.rho_c_max * p.rod_worth_fraction_L) * c_L;
-    rho_boron_U = -(p.rho_c_max * p.rod_worth_fraction_U) * c_U;
-    rho_follower_L = p.rho_graphite_follower * (1 - c_L);
-    rho_follower_U = p.rho_graphite_follower * (1 - c_U);
-    rho_rod_L = rho_boron_L + rho_follower_L;
-    rho_rod_U = rho_boron_U + rho_follower_U;
-    % For display we keep a single "rod" term as the mean of both regions
-    rho.boron = (rho_boron_L + rho_boron_U) / 2;
-    rho.follower = (rho_follower_L + rho_follower_U) / 2;
-    rho.rod = rho.boron + rho.follower;
+    % D. Control rod reactivity (per LaTeX model)
+    % Lower: ρ_rod = κ_tip × c × e^(-10c) - κ_boron × c
+    % Upper: ρ_rod = -κ_boron × c
+    rho_rod_L = p.kappa_tip * c_L * exp(-10 * c_L) - p.kappa_boron * c_L;
+    rho_rod_U = -p.kappa_boron * c_U;
+    % For display we keep components for visualization
+    rho.rod_L = rho_rod_L;
+    rho.rod_U = rho_rod_U;
+    rho.rod = (rho_rod_L + rho_rod_U) / 2;
 
-    % F. Positive SCRAM tip effect (lower region only)
-    rho.tip_L = 0;
-    if t >= p.t_scram
-        dt_scram = t - p.t_scram;
-        rho.tip_L = p.rho_tip * exp(-dt_scram / p.tau_tip);
-    end
-
-    % Total reactivity per region and average
-    rho.total_L = rho.void_L + rho.dop_L + rho_mod_L + rho.xen_L + rho_rod_L + rho.tip_L;
-    rho.total_U = rho.void_U + rho.dop_U + rho_mod_U + rho.xen_U + rho_rod_U;
+    % Total reactivity per region and average (per LaTeX: no moderator feedback)
+    rho.total_L = rho.void_L + rho.dop_L + rho.xen_L + rho_rod_L;
+    rho.total_U = rho.void_U + rho.dop_U + rho.xen_U + rho_rod_U;
     rho.total   = (rho.total_L + rho.total_U) / 2;
 
     % Flags for display
@@ -936,9 +912,36 @@ function update_stats_panel(state, rho, gfx, params)
             rho.total, avg_rho_void, avg_rho_dop, avg_rho_xen, rho.rod));
     end
 
+    % Density + smoothed power and fission rate (physics-based)
+    persistent sm_power sm_frate initialized
+    p = params.p_rbmk;
+
     total_density = state.n_L + state.n_U;
-    set(gfx.h_density, 'String', sprintf('Density: %.3f\n  n_L = %.3f\n  n_U = %.3f', ...
-        total_density, state.n_L, state.n_U));
+    power_MW_raw = p.k_P * total_density;  % P = k_P * (n_L + n_U)
+    E_fission_J = 3.204e-11;  % ~200 MeV per fission
+    if power_MW_raw > 0
+        fis_rate_raw = power_MW_raw * 1e6 / E_fission_J;
+    else
+        fis_rate_raw = 0;
+    end
+
+    if isempty(initialized)
+        sm_power = power_MW_raw;
+        sm_frate = fis_rate_raw;
+        initialized = true;
+    else
+        alpha_disp = 0.2;  % Smoothing factor (0 < alpha <= 1)
+        sm_power = sm_power + alpha_disp * (power_MW_raw - sm_power);
+        sm_frate = sm_frate + alpha_disp * (fis_rate_raw - sm_frate);
+    end
+
+    power_MW = sm_power;
+    fis_rate = sm_frate;
+    set(gfx.h_density, 'String', sprintf(['Density: %.3f\n' ...
+        '  n_L = %.3f\n  n_U = %.3f\n' ...
+        'Power: %.1f MW_{th}\n' ...
+        'Fission rate: %.2e f/s'], ...
+        total_density, state.n_L, state.n_U, power_MW, fis_rate));
 
     set(gfx.h_neutron_count, 'String', sprintf('Neutrons: %d / %d', ...
         length(state.neutron_x), state.target_particles));
@@ -1033,16 +1036,17 @@ function print_final_summary(state, gfx, grid, params, cfg)
     % Use the same physics as rbmk_dynamics for the summary breakdown.
     p = params.p_rbmk;
     avg_rho_void = p.kappa_V * (state.alpha_L + state.alpha_U) / 2;
-    avg_rho_dop = p.kappa_D0 * (sqrt(state.Tf_L) - sqrt(p.Tf0));
+    avg_rho_dop = p.kappa_D * (sqrt(state.Tf_L) - sqrt(p.T0));
     avg_rho_xen = -p.kappa_X * (state.X_L + state.X_U) / 2;
-    rho_boron = -p.rho_c_max * c_normalized;
-    rho_follower = p.rho_graphite_follower * (1 - c_normalized);
-    rho_rod = rho_boron + rho_follower;
+    % Rod reactivity per LaTeX model
+    rho_rod_L = p.kappa_tip * state.c_L * exp(-10 * state.c_L) - p.kappa_boron * state.c_L;
+    rho_rod_U = -p.kappa_boron * state.c_U;
+    rho_rod = (rho_rod_L + rho_rod_U) / 2;
     rho_total = avg_rho_void + avg_rho_dop + avg_rho_xen + rho_rod;
     fprintf('  rho_void    = +%.4f (positive void coefficient)\n', avg_rho_void);
     fprintf('  rho_Doppler = %.4f (fuel temperature feedback)\n', avg_rho_dop);
     fprintf('  rho_Xenon   = %.4f (Xe-135 poisoning)\n', avg_rho_xen);
-    fprintf('  rho_rod     = %.4f (control rods: boron %.4f + follower %.4f)\n', rho_rod, rho_boron, rho_follower);
+    fprintf('  rho_rod     = %.4f (lower: %.4f, upper: %.4f)\n', rho_rod, rho_rod_L, rho_rod_U);
     fprintf('  rho_TOTAL   = %.4f (net reactivity)\n', rho_total);
     fprintf('  Target particles: %d\n', state.target_particles);
     fprintf('===================================\n');

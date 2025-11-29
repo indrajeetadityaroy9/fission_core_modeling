@@ -204,40 +204,50 @@ function p = rbmk_parameters()
     % Two-region model couples lower and upper halves of 7m core via neutron
     % diffusion. Neutrons produced in one region can diffuse to the other.
     %
+    % IMPORTANT: LaTeX model shows D_n/H² in equations. Here, p.Dn is the
+    % PRE-COMPUTED coupling frequency (D_n/H² already calculated).
+    % The solver uses p.Dn directly without dividing by H².
+    %
     % CALIBRATION: Fitted to match axial power distribution measurements
     % PHYSICS: D_n represents axial diffusion coupling strength
     %   Higher D_n → stronger coupling → more uniform power distribution
     %   Lower D_n → weaker coupling → more independent region behavior
     %
     % Typical coupling time: τ_coupling ≈ 1/D_n ≈ 0.17 seconds
-    p.Dn = 6.0;              % Neutron coupling coefficient (1/s)
+    p.Dn = 6.0;              % Neutron coupling frequency (1/s)
+                             % This is D_n/H² pre-computed (H ≈ 3.5m half-height)
                              % SOURCE: Fitted to axial power shape [phenomenological]
                              % UNCERTAINTY: ±50% (weakly constrained)
-                             % UNITS: inverse seconds
+                             % UNITS: inverse seconds (Hz)
 
     % ------------------------------------------------------------------------
     % Power Conversion
     % ------------------------------------------------------------------------
-    % The model uses normalized neutron density n (dimensionless), where:
-    %   n = 1.0 corresponds to nominal power (3200 MW thermal)
-    %   n = 0.5 corresponds to 50% power (1600 MW)
+    % TWO-REGION POWER SCALING
+    % ------------------------------------------------------------------------
+    % The model splits the 3200 MW core into TWO equal regions (lower/upper).
+    % Each region has:
+    %   - n = 1.0 represents nominal power FOR THAT REGION (1600 MW)
+    %   - m_flow = 8000 kg/s (half the total core flow)
     %
-    % Conversion to thermal power: P(MW) = k_P × (n_L + n_U)
-    % Note: SUM of both regions, not average!
+    % TOTAL reactor power: P_total = k_P × (n_L + n_U)
+    %   - When n_L = 1.0, n_U = 1.0: P_total = 1600 × 2 = 3200 MW (nominal)
+    %   - When n_L = 0.5, n_U = 0.5: P_total = 1600 × 1 = 1600 MW (50%)
     %
     % RBMK-1000 specifications [5]:
-    %   - Thermal power: 3200 MW
+    %   - Total thermal power: 3200 MW
     %   - Electrical output: 1000 MW (31% efficiency)
     %   - 1661 fuel channels with 18.5 kg U each
     %   - Average power density: 3.6 MW/m³
-    p.P_nominal = 3200;      % Nominal thermal power (MW)
+    p.P_nominal = 3200;      % Total nominal thermal power (MW)
                              % SOURCE: Design specification [5]
                              % UNCERTAINTY: exact (design value)
                              % UNITS: megawatts thermal
 
-    p.k_P = 3200;            % Power scaling factor (MW)
-                             % Ensures P = k_P × n gives correct units
-                             % UNITS: megawatts
+    p.k_P = 1600;            % Power scaling factor PER REGION (MW)
+                             % CRITICAL: 3200 MW / 2 regions = 1600 MW each
+                             % This ensures correct steam quality calculation
+                             % UNITS: megawatts per region
 
     % ========================================================================
     %% 2. THERMAL-HYDRAULICS PARAMETERS
@@ -268,7 +278,7 @@ function p = rbmk_parameters()
                              % UNITS: seconds
 
     % ------------------------------------------------------------------------
-    % Void Relaxation Times
+    % Void Relaxation Time
     % ------------------------------------------------------------------------
     % How quickly does void fraction respond to changes in power/temperature?
     %
@@ -281,23 +291,13 @@ function p = rbmk_parameters()
     % Faster than thermal inertia, slower than neutronics.
     %
     % CALIBRATION: Fitted to match observed oscillation frequency (~0.5 rad/s)
-    p.tau_v_L = 1.0;         % Void relaxation time, lower region (s)
+    p.tau_void = 1.0;        % Void relaxation time (s)
                              % SOURCE: Fitted to bifurcation frequency [phenomenological]
                              % UNCERTAINTY: ±50%
                              % UNITS: seconds
 
-    p.tau_v_U = 1.0;         % Void relaxation time, upper region (s)
-                             % SOURCE: Assumed symmetric with lower region
-                             % UNCERTAINTY: ±50%
-                             % UNITS: seconds
-
-    % Advection coupling strength (how strongly does upper void depend on
-    % delayed lower void from transport?)
-    % k_adv = 1.0 means full coupling (upper void driven by α_L(t-τ))
-    % k_adv = 0.0 means no coupling (each region independent)
-    p.k_adv = 1.0;           % Advection coupling strength (dimensionless)
-                             % SOURCE: Full coupling assumption
-                             % UNITS: dimensionless (0 to 1)
+    % NOTE: Upper region void advection uses coefficient 2/tau_flow directly
+    % per LaTeX model equations (no separate k_adv parameter)
 
     % ------------------------------------------------------------------------
     % Boiling Curve - CRITICAL FOR LOW-POWER INSTABILITY
@@ -354,6 +354,20 @@ function p = rbmk_parameters()
                              % SOURCE: Steam tables (IAPWS-IF97)
                              % UNCERTAINTY: ±1% (well-known thermodynamic property)
                              % UNITS: kilojoules per kilogram
+
+    % ------------------------------------------------------------------------
+    % Heat Constant for Steam Quality Calculation
+    % ------------------------------------------------------------------------
+    % Pre-calculated constant for computational efficiency.
+    % Steam quality: x = K_heat × n / m_flow
+    %
+    % DERIVATION: K_heat = (k_P × 1000) / h_fg
+    %   - k_P in MW, ×1000 converts to kW for consistency with h_fg in kJ/kg
+    %   - At nominal power (n=1 per region), x = 1063/8000 ≈ 0.13 (13% steam quality)
+    %   - Total reactor at nominal: both regions at n=1 → combined ~26% quality
+    p.K_heat = (p.k_P * 1000) / p.h_fg;  % Heat constant (kW·s/kg)
+                             % VALUE: ≈1063 per region (with k_P=1600)
+                             % UNITS: kilowatts × seconds / kilogram
 
     p.m_flow = 8000;         % Mass flow rate per region (kg/s)
                              % SOURCE: Half-core estimate from design flow [5]
@@ -452,7 +466,7 @@ function p = rbmk_parameters()
     % DOPPLER COEFFICIENT - Stabilizing but Weak
     % ------------------------------------------------------------------------
     % How does reactivity change with fuel temperature?
-    %   ρ_Doppler = κ_D0 × (√T_f - √T_f0) × doppler_enhancement
+    %   ρ_Doppler = κ_D × (√T_f - √T_0)
     %
     % PHYSICS: Doppler broadening of U-238 resonance absorption
     %   - Higher fuel temp → wider absorption resonances
@@ -465,46 +479,20 @@ function p = rbmk_parameters()
     %   At low power, Doppler can't overcome void feedback
     %
     % CALIBRATION: -1000 pcm at nominal power [2]
-    %   κ_D0 = -0.010 gives -1000 pcm when (√T_f - √T_f0) ≈ 10
+    %   κ_D = -0.010 gives -1000 pcm when (√T_f - √T_0) ≈ 10
     %   (corresponds to T_f ≈ 500°C at nominal power)
-    %
-    % POWER ENHANCEMENT: Doppler strengthens at high power
-    %   doppler_enhancement = 1.5 at nominal power
-    %   This contributes to stability at high power
     %
     % NUMERICAL EXAMPLE:
     %   At T_f = 400°C: ρ_Doppler ≈ -0.008 = -1.6β (moderate negative)
     %   At T_f = 600°C: ρ_Doppler ≈ -0.012 = -2.4β (stronger negative)
-    p.kappa_D0 = -0.010;     % Doppler coefficient at nominal power (dimensionless)
+    p.kappa_D = -0.010;      % Doppler coefficient (dimensionless)
                              % SOURCE: OECD-NEA calculations [2]
                              % CALIBRATED TO: -1000 pcm = -2β
                              % UNCERTAINTY: ±20%
-                             % UNITS: dimensionless (per √°C relative to T_f0)
+                             % UNITS: dimensionless (per √°C relative to T_0)
 
-    p.Tf0 = 270;             % Reference fuel temperature (°C)
-                             % SOURCE: Chosen below operating range for √T scaling
-                             % UNITS: degrees Celsius
-
-    % ------------------------------------------------------------------------
-    % MODERATOR TEMPERATURE COEFFICIENT - Positive but Negligible
-    % ------------------------------------------------------------------------
-    % How does reactivity change with graphite temperature?
-    %   ρ_moderator = κ_M0 × √(T_m / T_m0)
-    %
-    % PHYSICS: Graphite moderator temperature affects neutron spectrum
-    %   - Higher moderator temp → harder spectrum → more leakage
-    %   - RBMK has POSITIVE moderator coefficient (unusual)
-    %   - But VERY WEAK: κ_M0 = 0.0002 (negligible in practice)
-    %
-    % This feedback is included for completeness but doesn't significantly
-    % affect stability or accident dynamics.
-    p.kappa_M0 = 0.0002;     % Moderator temperature coefficient (dimensionless)
-                             % SOURCE: RBMK design studies [weak positive]
-                             % UNCERTAINTY: ±50% (poorly constrained, not critical)
-                             % UNITS: dimensionless
-
-    p.Tm0 = 270;             % Reference moderator temperature (°C)
-                             % SOURCE: Inlet coolant temperature (reference point)
+    p.T0 = 270;              % Reference temperature for Doppler (°C)
+                             % SOURCE: Coolant inlet temperature (reference point)
                              % UNITS: degrees Celsius
 
     % ========================================================================
@@ -560,6 +548,28 @@ function p = rbmk_parameters()
                              % PHYSICS: Highest absorption cross-section of any nuclide!
                              % UNCERTAINTY: ±5%
                              % UNITS: square centimeters
+
+    % ------------------------------------------------------------------------
+    % Nominal Neutron Flux - CRITICAL FOR XENON BURNOUT
+    % ------------------------------------------------------------------------
+    % The xenon burnout rate requires multiplying sigma_X by neutron flux:
+    %   burnout_rate = sigma_X × Phi × n
+    %
+    % Without this, sigma_X (cm²) × n (dimensionless) gives wrong units!
+    % The burnout term would be ~1e-18 instead of ~1e-4, making it negligible.
+    %
+    % PHYSICS: At nominal power (n=1), thermal neutron flux is ~1e14 n/cm²/s
+    %   burnout_rate = 2e-18 cm² × 1e14 n/cm²/s × 1 = 2e-4 /s
+    %   Compare to decay: lambda_X = 2.1e-5 /s
+    %   Ratio: burnout/decay ≈ 10 at nominal power (burnout dominates)
+    %
+    % This ratio is why xenon equilibrium is power-dependent:
+    %   High power → high burnout → low X_eq
+    %   Low power → low burnout → high X_eq (Xenon Pit!)
+    p.Phi_nominal = 1.0e14;  % Nominal thermal neutron flux (n/cm²/s)
+                             % SOURCE: Typical RBMK thermal flux
+                             % UNCERTAINTY: ±30%
+                             % UNITS: neutrons per cm² per second
 
     % ------------------------------------------------------------------------
     % Xenon Reactivity Coefficient - CRITICAL FOR STABILITY
@@ -640,42 +650,30 @@ function p = rbmk_parameters()
                              % UNITS: seconds
 
     % ------------------------------------------------------------------------
-    % Control Rod Worth - Total Negative Reactivity
+    % Control Rod Reactivity Coefficients (LaTeX Model)
     % ------------------------------------------------------------------------
-    % Total worth of boron carbide absorber section when fully inserted.
-    % This is the NEGATIVE reactivity from neutron absorption.
+    % RBMK rod reactivity uses the unified formula:
+    %   Lower region: ρ_rod,L = κ_tip × c × e^(-10c) - κ_boron × c
+    %   Upper region: ρ_rod,U = -κ_boron × c
     %
-    % CALIBRATION: INSAG-7 reports 2-3β per rod [1]
-    % Full core has 211 control rods + emergency protection rods
-    % Effective worth in two-region model: 2β total
+    % The tip effect (positive spike from graphite) is embedded in the lower
+    % region formula via the exponential term. This creates:
+    %   - Positive reactivity spike at small c (c ≈ 0.1)
+    %   - Transition to negative as c increases
+    %   - Peak positive reactivity at c = 0.1 (mathematically optimal)
     %
-    % IMPORTANT: This is just the BORON section worth.
-    % Graphite followers add SEPARATE positive reactivity (see below).
-    p.rho_c_max = 0.010;     % Maximum negative worth of boron section (dimensionless)
-                             % SOURCE: INSAG-7 [1] - 2β total worth
-                             % CALIBRATED TO: 2β = 0.010
+    % CALIBRATION: κ_tip = 0.161 produces +1β spike at c ≈ 0.1
+    %   κ_boron = 0.010 produces -2β when fully inserted (c = 1)
+    p.kappa_tip = 0.161;     % Tip reactivity coefficient (dimensionless)
+                             % SOURCE: Calibrated to produce +1β accident spike
                              % UNCERTAINTY: ±20%
-                             % UNITS: dimensionless (Δk/k)
+                             % UNITS: dimensionless
 
-    % ------------------------------------------------------------------------
-    % Rod Worth Distribution Between Regions
-    % ------------------------------------------------------------------------
-    % In two-region model, how is rod worth split between lower and upper?
-    % Default: symmetric (50/50 split)
-    %
-    % ASYMMETRIC DISTRIBUTION (advanced usage):
-    %   - If rods preferentially control lower region: rod_worth_fraction_L > 0.5
-    %   - Chernobyl had bottom-entry rods → slightly higher lower worth
-    %   - Model allows flexibility for sensitivity studies
-    %
-    % VALIDATION: Sum must equal 1.0 (checked automatically at end)
-    p.rod_worth_fraction_L = 0.5;  % Fraction of total rod worth in lower region
-                                   % SOURCE: Symmetric assumption (default)
-                                   % UNITS: dimensionless (0 to 1)
-
-    p.rod_worth_fraction_U = 0.5;  % Fraction of total rod worth in upper region
-                                   % SOURCE: Symmetric assumption (default)
-                                   % UNITS: dimensionless (0 to 1)
+    p.kappa_boron = 0.010;   % Boron absorption coefficient (dimensionless)
+                             % SOURCE: INSAG-7 [1] - 2β total worth
+                             % CALIBRATED TO: -2β = -0.010 at c=1
+                             % UNCERTAINTY: ±20%
+                             % UNITS: dimensionless
 
     % ------------------------------------------------------------------------
     % Control Rod Target Positions
@@ -693,103 +691,13 @@ function p = rbmk_parameters()
                              % SOURCE: Emergency shutdown procedure
                              % UNITS: dimensionless (0 to 1)
 
-    % ------------------------------------------------------------------------
-    % DESIGN FLAW #1: GRAPHITE FOLLOWERS
-    % ------------------------------------------------------------------------
-    % RBMK control rods have a UNIQUE design:
-    %   - Top section: boron carbide absorber (captures neutrons)
-    %   - Bottom section: graphite displacer (moderates neutrons)
-    %   - Purpose: displace water (absorber) with graphite (better moderator)
-    %
-    % REACTIVITY COMPONENTS:
-    %
-    %   When rods WITHDRAWN (c = 0):
-    %     - Boron OUT of core → no absorption → neutral reactivity
-    %     - Graphite IN core → displaces water → POSITIVE reactivity
-    %     - Net effect: +ρ_graphite_follower
-    %
-    %   When rods INSERTED (c = 1):
-    %     - Boron IN core → strong absorption → negative reactivity
-    %     - Graphite OUT of core → water returns → less moderation → neutral
-    %     - Net effect: -ρ_c_max (large negative)
-    %
-    % TOTAL CONTROL ROD REACTIVITY MODEL:
-    %   ρ_rod(c) = -ρ_c_max × c + ρ_graphite_follower × (1 - c)
-    %
-    % CALIBRATION: ρ_graphite_follower ≈ 0.3 × ρ_c_max [1]
-    %   Graphite effect is ~30% of boron worth
-    %   For ρ_c_max = 0.010 (2β): ρ_graphite_follower = 0.003 (+0.6β)
-    %
-    % CHERNOBYL CONFIGURATION:
-    %   - Operating at 200 MW with rods fully withdrawn (c ≈ 0)
-    %   - Baseline positive reactivity: +0.6β from graphite followers
-    %   - This sets up the positive scram effect (see below)
-    %
-    % NUMERICAL EXAMPLES:
-    %   At c = 0.0 (rods out): ρ_rod = +0.003 = +0.6β  (POSITIVE baseline)
-    %   At c = 0.5 (rods half): ρ_rod = -0.0035 = -0.7β (slightly negative)
-    %   At c = 1.0 (rods in):  ρ_rod = -0.010 = -2.0β  (full negative worth)
-    p.rho_graphite_follower = 0.003;  % Positive reactivity from graphite displacers
-                                      % SOURCE: INSAG-7 [1] - estimated at ~30% of rod worth
-                                      % CALIBRATED TO: +0.6β = +0.003
-                                      % UNCERTAINTY: ±30% (poorly constrained pre-accident)
-                                      % UNITS: dimensionless (Δk/k)
-
-    % ------------------------------------------------------------------------
-    % DESIGN FLAW #2: POSITIVE SCRAM EFFECT
-    % ------------------------------------------------------------------------
-    % When SCRAM is initiated, rods insert from TOP of core.
-    % But graphite tip is at BOTTOM of rod assembly!
-    %
-    % INSERTION SEQUENCE:
-    %   t = 0-2s: Graphite tips enter BOTTOM of core (lower region)
-    %             → Displace water with graphite
-    %             → ADD positive reactivity (+1β)
-    %
-    %   t = 2-18s: Boron section gradually enters core
-    %              → Starts absorbing neutrons
-    %              → Negative reactivity slowly builds up
-    %
-    % THE FATAL FLAW:
-    %   If reactor is already near prompt critical (due to oscillations),
-    %   the initial +1β spike can push it OVER the edge.
-    %
-    % CHERNOBYL ACCIDENT TIMELINE:
-    %   t = 0s:   SCRAM button pressed (reactor oscillating at ~500 MW)
-    %   t = 0-2s: Graphite tips enter → +1β reactivity spike
-    %   t = 1-2s: Combined with oscillation peak → total ρ > β (prompt critical)
-    %   t = 2-3s: Exponential power surge to 30 GW (100× nominal)
-    %   t = 3-4s: Fuel disintegration, steam explosion
-    %   t = 4-5s: Core destruction, graphite fire
-    %
-    % CALIBRATION: ρ_tip = +1β = 0.005 [1]
-    %   INSAG-7 documents this effect as cause of accident
-    %   Magnitude estimated from forensic analysis of power surge
-    %
-    % POST-ACCIDENT FIX:
-    %   - Removed graphite tips
-    %   - Shortened absorber section
-    %   - Kept rods partially inserted during operation
-    %
-    % NUMERICAL EXAMPLE:
-    %   Reactor at 500 MW with ρ = 0
-    %   Oscillation brings ρ to +0.003 (+0.6β)
-    %   SCRAM adds +0.005 (+1.0β)
-    %   Total: +0.008 (+1.6β) → PROMPT CRITICAL → explosion
-    p.rho_tip = 0.005;       % Positive reactivity from graphite tip insertion
-                             % SOURCE: INSAG-7 [1] - forensic reconstruction
-                             % CALIBRATED TO: +1β = 0.005
-                             % UNCERTAINTY: ±30% (estimated from accident dynamics)
-                             % UNITS: dimensionless (Δk/k)
-
-    p.tau_tip = 2.0;         % Duration of tip effect (s)
-                             % SOURCE: Estimated from rod geometry and insertion speed
-                             % PHYSICS: Time for 1.5m graphite tip to enter 7m core
-                             % UNCERTAINTY: ±50%
-                             % UNITS: seconds
+    % NOTE: The graphite tip effect (positive SCRAM) is now embedded in the
+    % rod reactivity formula via kappa_tip × c × e^(-10c) for the lower region.
+    % This captures the physics where initial rod insertion adds positive
+    % reactivity before the boron absorber section engages.
 
     % ========================================================================
-    %% 6. POWER-DEPENDENT STABILITY ENHANCEMENTS
+    %% 6. STABILITY PARAMETERS
     % ========================================================================
     % Phenomenological effects that strengthen at high power, contributing to
     % the stabilization above 762 MW (Hopf bifurcation threshold).
@@ -824,26 +732,6 @@ function p = rbmk_parameters()
                                   % UNITS: logical (true/false)
 
     % ------------------------------------------------------------------------
-    % Doppler Enhancement at High Power
-    % ------------------------------------------------------------------------
-    % Doppler coefficient strengthens at high power due to:
-    %   - Higher fuel temperatures → more U-238 resonance absorption
-    %   - Flux spectrum hardening in high-void regions
-    %
-    % PHENOMENOLOGICAL MODEL:
-    %   κ_D_effective = κ_D0 × [1 + (doppler_enhancement - 1) × power_fraction]
-    %
-    % At nominal power (n=1): κ_D increases by 50% (enhancement = 1.5)
-    % At low power (n=0.2):   κ_D is near baseline (enhancement ≈ 1.1)
-    %
-    % This contributes to high-power stability but is NOT sufficient to
-    % stabilize low power (void feedback still dominates).
-    p.doppler_enhancement = 1.5;  % Doppler multiplier at nominal power (dimensionless)
-                                  % SOURCE: Phenomenological fit to stability threshold
-                                  % UNCERTAINTY: ±50% (effective parameter, not physical)
-                                  % UNITS: dimensionless (multiplier)
-
-    % ------------------------------------------------------------------------
     % Void Saturation Coefficient
     % ------------------------------------------------------------------------
     % At high void fractions, void dynamics become LESS sensitive:
@@ -851,38 +739,43 @@ function p = rbmk_parameters()
     %   - Further boiling has diminishing returns
     %   - Effective time constant increases
     %
-    % SATURATION MODEL:
-    %   effective_time_constant = τ_v × [1 + void_saturation_coeff × α]
+    % SATURATION MODEL (per LaTeX equations):
+    %   saturation_factor = 1 / (1 + k_sat × α)
     %
     % NUMERICAL EXAMPLES:
-    %   At α = 0.0: no saturation (factor = 1.0)
-    %   At α = 0.4: saturation_factor = 1.8 (44% slower dynamics)
-    %   At α = 0.6: saturation_factor = 2.2 (55% slower dynamics)
+    %   At α = 0.0: factor = 1.0 (no saturation)
+    %   At α = 0.4: factor = 0.56 (44% reduction in rate)
+    %   At α = 0.6: factor = 0.45 (55% reduction in rate)
     %
     % PHYSICS: High void → longer bubble coalescence time → slower dynamics
     %
     % This effect contributes to stability at high power where void fractions
     % are large (α ≈ 0.6). At low power (α ≈ 0.2), minimal effect.
-    p.void_saturation_coeff = 2.0;  % Void saturation coefficient (dimensionless)
-                                    % SOURCE: Fitted to match stability threshold [3]
-                                    % PHYSICS: Reduces void dynamics at high α
-                                    % UNCERTAINTY: ±50% (phenomenological)
-                                    % UNITS: dimensionless
+    p.k_sat = 2.0;           % Void saturation coefficient (dimensionless)
+                             % SOURCE: Fitted to match stability threshold [3]
+                             % PHYSICS: Reduces void dynamics at high α
+                             % UNCERTAINTY: ±50% (phenomenological)
+                             % UNITS: dimensionless
 
     % ========================================================================
     %% 7. PARAMETER VALIDATION
     % ========================================================================
     % Automatic consistency checks to catch configuration errors.
 
-    % Check that rod worth fractions sum to 1.0 (conservation of worth)
-    rod_worth_sum = p.rod_worth_fraction_L + p.rod_worth_fraction_U;
-    if abs(rod_worth_sum - 1.0) > 1e-10
-        error('rbmk_parameters:InvalidRodWorth', ...
-            'Rod worth fractions must sum to 1.0, got %.6f', rod_worth_sum);
+    % Validate physical bounds
+    if p.beta <= 0 || p.beta > 0.01
+        warning('rbmk_parameters:BetaOutOfRange', ...
+            'Delayed neutron fraction β = %.4f is outside typical range [0, 0.01]', p.beta);
     end
 
-    % Future validation checks can be added here:
-    %   - Positive parameters (masses, time constants, etc.)
-    %   - Physical bounds (0 < α_max < 1, β < 0.01, etc.)
-    %   - Dimensional consistency
+    if p.alpha_max <= 0 || p.alpha_max > 1.0
+        error('rbmk_parameters:AlphaMaxInvalid', ...
+            'Maximum void fraction must be in (0, 1], got %.3f', p.alpha_max);
+    end
+
+    % Verify derived parameter K_heat is positive
+    if p.K_heat <= 0
+        error('rbmk_parameters:KHeatInvalid', ...
+            'K_heat must be positive, got %.3f', p.K_heat);
+    end
 end

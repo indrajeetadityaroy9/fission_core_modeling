@@ -33,25 +33,21 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     %   X     - Xenon-135 concentration (strong neutron poison)
     %   c     - Control rod insertion fraction (0 = withdrawn, 1 = inserted)
     %
-    % KEY PHYSICS IMPLEMENTED:
+    % KEY PHYSICS IMPLEMENTED (per LaTeX model):
     %   1. Point kinetics with delayed neutrons (β = 0.005, Λ = 0.48 ms)
     %   2. Spatial coupling between regions (neutron diffusion)
     %   3. POSITIVE void coefficient (κ_V = +0.025) - PRIMARY DESIGN FLAW
-    %   4. Doppler feedback (√T law, power-enhanced at high power)
+    %   4. Doppler feedback (simple √T law: κ_D × (√T_f - √T_0))
     %   5. Xenon/Iodine decay chains (time-dependent poisoning)
     %   6. Coolant transport delay (τ_flow = 2.0 s) - CAUSES HOPF BIFURCATION
-    %   7. Graphite follower effect - RBMK DESIGN FLAW #2
-    %   8. Positive SCRAM effect - RBMK DESIGN FLAW #3
-    %
-    % ENHANCEMENTS BEYOND BASIC MODEL:
-    %   - Power-dependent Doppler enhancement (stronger at high power)
-    %   - Void saturation at high void fractions (prevents unphysical runaway)
-    %   - Xenon equilibrium provides automatic stabilization at high power
+    %   7. Unified rod reactivity model with embedded tip effect
     %
     % DESIGN FLAWS MODELED:
     %   1. Positive void coefficient: More steam → MORE power (unstable feedback)
-    %   2. Graphite followers: Withdrawn rods add +0.6β positive reactivity
-    %   3. Positive SCRAM: Rod insertion FIRST adds +1β before absorption
+    %   2. Positive SCRAM: Rod reactivity follows κ_tip×c×e^(-10c) - κ_boron×c
+    %      Peak positive spike at c ≈ 0.1 during insertion
+    %
+    % VOID SATURATION: 1/(1 + k_sat×α) reduces sensitivity at high void
     %
     % TYPICAL USAGE:
     %   p = rbmk_parameters();
@@ -120,18 +116,24 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     % Calculate equilibrium void fraction based on power and coolant flow
     % Physics: Higher power → more boiling → higher void fraction
 
-    % Steam quality x = (heat generated) / (heat capacity of coolant)
-    % x = power / (mass_flow × latent_heat_of_vaporization)
-    %
-    % Unit conversion: k_P in MW, need kW to match h_fg in kJ/kg
-    % Small epsilon (1e-6) prevents division by zero
-    x_L = (p.k_P * n_L * 1000) / (p.m_flow * p.h_fg + 1e-6);
-    x_U = (p.k_P * n_U * 1000) / (p.m_flow * p.h_fg + 1e-6);
+    % Steam quality x = K_heat × n / m_flow (per LaTeX model)
+    % K_heat is pre-calculated: K_heat = (k_P × 1000) / h_fg
+    % This is more computationally efficient than calculating at each step
+    x_L = (p.K_heat * n_L) / p.m_flow;
+    x_U = (p.K_heat * n_U) / p.m_flow;
 
     % Prevent complex numbers during solver iterations
     % (can occur if neutron density temporarily goes slightly negative)
     x_L = max(0, x_L);
     x_U = max(0, x_U);
+
+    % REGULARIZATION: Add small epsilon to prevent Jacobian singularity
+    % The boiling curve uses x^0.25, whose derivative is 0.25/x^0.75.
+    % As x→0, this derivative →∞, causing numerical issues in stability analysis.
+    % Adding epsilon ≈ 1e-8 keeps results accurate while bounding the Jacobian.
+    x_eps = 1e-8;
+    x_L = x_L + x_eps;
+    x_U = x_U + x_eps;
 
     % EQUILIBRIUM VOID FRACTION (boiling curve)
     % Uses generalized logistic function: α_eq = α_max × x^p / (1 + x^p)
@@ -144,7 +146,7 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     alpha_eq_L = p.alpha_max * (x_L^p.p_shape) / (1 + x_L^p.p_shape);
     alpha_eq_U = p.alpha_max * (x_U^p.p_shape) / (1 + x_U^p.p_shape);
 
-    % VOID SATURATION FACTOR (enhancement to prevent unphysical runaway)
+    % VOID SATURATION FACTOR (per LaTeX model)
     % At very high void fractions (α > 0.5), reduce the sensitivity of void dynamics
     % Physics: As voids coalesce, further boiling has less impact on reactivity
     %
@@ -153,8 +155,8 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     %   α = 0.0: saturation = 1.0   (no reduction)
     %   α = 0.4: saturation = 0.56  (44% reduction)
     %   α = 0.6: saturation = 0.45  (55% reduction)
-    saturation_L = 1.0 / (1.0 + p.void_saturation_coeff * alpha_L);
-    saturation_U = 1.0 / (1.0 + p.void_saturation_coeff * alpha_U);
+    saturation_L = 1.0 / (1.0 + p.k_sat * alpha_L);
+    saturation_U = 1.0 / (1.0 + p.k_sat * alpha_U);
 
     %% ========================================================================
     %  SECTION 3: REACTIVITY FEEDBACKS
@@ -184,58 +186,20 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     % ------------------------------------------------------------------------
     % B. DOPPLER REACTIVITY FEEDBACK (Fuel Temperature) - STABILIZING
     % ------------------------------------------------------------------------
-    % Based on Doppler broadening of U-238 resonances
-    % Temperature dependence: ρ ∝ √T (from quantum mechanics)
+    % Based on Doppler broadening of U-238 resonances (per LaTeX model)
+    % Temperature dependence: ρ_D = κ_D × (√T_f - √T_0)
     %
     % Physics: Higher fuel temperature → broader U-238 resonances
     %          → more neutron capture → NEGATIVE reactivity (stabilizing)
     %
-    % Base Doppler coefficient (√T law):
-    rho_dop_base_L = p.kappa_D0 * (sqrt(Tf_L) - sqrt(p.Tf0));
-    rho_dop_base_U = p.kappa_D0 * (sqrt(Tf_U) - sqrt(p.Tf0));
-
-    % POWER-DEPENDENT ENHANCEMENT (research-based phenomenology)
-    % Observation: Doppler feedback is STRONGER at high power
-    % Mechanisms:
-    %   - Better fuel-clad thermal contact at high burnup
-    %   - Higher temperature increases resonance broadening effectiveness
-    %   - Phenomenological multiplier: 1.0 at zero power → 1.5 at full power
-    %
-    % Enhancement factor: mult = 1.0 + (1.5 - 1.0) × n
-    power_frac_L = n_L;  % Normalized power (n=1.0 at nominal)
-    power_frac_U = n_U;
-
-    if isfield(p, 'doppler_enhancement')
-        doppler_mult_L = 1.0 + (p.doppler_enhancement - 1.0) * power_frac_L;
-        doppler_mult_U = 1.0 + (p.doppler_enhancement - 1.0) * power_frac_U;
-    else
-        % Fallback if enhancement not specified
-        doppler_mult_L = 1.0;
-        doppler_mult_U = 1.0;
-    end
-
-    % Apply enhancement
-    rho_dop_L = rho_dop_base_L * doppler_mult_L;
-    rho_dop_U = rho_dop_base_U * doppler_mult_U;
-
     % Why this matters for stability:
     %   At LOW power:  weak Doppler → can't overcome positive void feedback
     %   At HIGH power: strong Doppler → dominates void feedback → stable
+    rho_dop_L = p.kappa_D * (sqrt(Tf_L) - sqrt(p.T0));
+    rho_dop_U = p.kappa_D * (sqrt(Tf_U) - sqrt(p.T0));
 
     % ------------------------------------------------------------------------
-    % C. MODERATOR TEMPERATURE FEEDBACK (Graphite Temperature)
-    % ------------------------------------------------------------------------
-    % Linear relationship: ρ_mod = κ_M0 × (T_m - T_m0)
-    %
-    % Physics: Hotter graphite → lower density → slightly less moderation
-    % κ_M0 ≈ -0.002 (small negative coefficient)
-    %
-    % Much weaker than Doppler or void feedbacks
-    rho_mod_L = p.kappa_M0 * (Tm_L - p.Tm0);
-    rho_mod_U = p.kappa_M0 * (Tm_U - p.Tm0);
-
-    % ------------------------------------------------------------------------
-    % D. XENON-135 REACTIVITY FEEDBACK - POWER-DEPENDENT STABILIZER
+    % C. XENON-135 REACTIVITY FEEDBACK - POWER-DEPENDENT STABILIZER
     % ------------------------------------------------------------------------
     % Linear relationship: ρ_xen = -κ_X × X
     % κ_X = 3.7×10⁻⁵ (xenon is extremely strong neutron absorber)
@@ -260,78 +224,52 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     rho_xen_U = -p.kappa_X * X_U;
 
     % ------------------------------------------------------------------------
-    % E. CONTROL ROD REACTIVITY - RBMK DESIGN FLAW #2
+    % D. CONTROL ROD REACTIVITY (per LaTeX model)
     % ------------------------------------------------------------------------
-    % RBMK control rods have TWO components:
-    %   1. Boron carbide absorber section (top 4m of rod)
-    %   2. Graphite follower/displacer section (bottom 4.5m of rod)
+    % RBMK rod reactivity uses the unified formula:
+    %   Lower region: ρ_rod,L = κ_tip × c × e^(-10c) - κ_boron × c
+    %   Upper region: ρ_rod,U = -κ_boron × c
     %
-    % Rod position c: 0 = fully withdrawn, 1 = fully inserted
+    % The tip effect (positive spike from graphite) is embedded in the lower
+    % region formula via the exponential term κ_tip × c × e^(-10c):
+    %   - At c = 0 (withdrawn): ρ_rod,L = 0
+    %   - At c = 0.1 (partial): ρ_rod,L peaks positive (tip effect)
+    %   - At c = 1 (inserted):  ρ_rod,L ≈ -κ_boron (boron dominates)
     %
-    % WHEN WITHDRAWN (c=0):
-    %   - Boron is OUT of core → no absorption
-    %   - Graphite displacer is IN core → displaces water
-    %   - Since graphite moderates better than water: POSITIVE reactivity!
-    %   - ρ_rod = 0 + ρ_graphite = +0.003 = +0.6β
+    % Peak tip effect occurs at c = 0.1 where d(c×e^(-10c))/dc = 0
+    % With κ_tip = 0.161: peak reactivity ≈ +0.006 = +1.2β
     %
-    % WHEN INSERTED (c=1):
-    %   - Boron is IN core → strong absorption
-    %   - Graphite is OUT of core → water returns
-    %   - ρ_rod = -ρ_c_max + 0 = -0.010 = -2β
-    %
-    % THIS IS A DESIGN FLAW: Withdrawing rods INCREASES reactivity beyond
-    % just removing absorption. Operators had to withdraw rods at low power
-    % to compensate for xenon, which added baseline positive reactivity.
-
-    % Boron absorption component (negative when inserted)
-    % Rod worth split between regions according to rod_worth_fraction_L/U
-    rho_boron_L = -(p.rho_c_max * p.rod_worth_fraction_L) * c_L;
-    rho_boron_U = -(p.rho_c_max * p.rod_worth_fraction_U) * c_U;
-
-    % Graphite follower component (positive when withdrawn)
-    % (1-c) term: maximum effect when c=0, zero effect when c=1
-    rho_follower_L = p.rho_graphite_follower * (1 - c_L);
-    rho_follower_U = p.rho_graphite_follower * (1 - c_U);
-
-    % Total control rod reactivity
-    rho_rod_L = rho_boron_L + rho_follower_L;
-    rho_rod_U = rho_boron_U + rho_follower_U;
+    % This models the fatal RBMK design flaw where inserting control rods
+    % initially adds POSITIVE reactivity before the boron section engages.
+    rho_rod_L = p.kappa_tip * c_L * exp(-10 * c_L) - p.kappa_boron * c_L;
+    rho_rod_U = -p.kappa_boron * c_U;
 
     % ------------------------------------------------------------------------
-    % F. POSITIVE SCRAM EFFECT - RBMK DESIGN FLAW #3
+    % E. EXCESS REACTIVITY (Fuel Bias from Enrichment)
     % ------------------------------------------------------------------------
-    % When SCRAM is triggered (t ≥ t_scram), control rods insert from c=0 → c=1
+    % Real reactor fuel has built-in excess reactivity to overcome negative
+    % feedbacks (Doppler, Xenon). Without this term, the model represents a
+    % "dead" core that cannot sustain criticality at power.
     %
-    % PROBLEM: The graphite section at the BOTTOM of the rod enters FIRST
-    % (when inserting from withdrawn position, the bottom enters the core first)
-    %
-    % This causes a POSITIVE reactivity spike before boron absorbers engage!
-    %
-    % Time evolution of tip effect:
-    %   t < t_scram:        ρ_tip = 0 (no SCRAM)
-    %   t = t_scram:        ρ_tip = +0.005 = +1β (graphite tips enter)
-    %   t = t_scram + 2s:   ρ_tip ≈ +0.002 (exponential decay, τ_tip = 2s)
-    %   t = t_scram + 10s:  ρ_tip ≈ 0 (tip effect gone, boron now in core)
-    %
-    % ONLY applied to LOWER region (where rods physically enter first)
-    %
-    % Combined catastrophe at Chernobyl:
-    %   - Rods withdrawn (c=0): Already +0.6β from followers
-    %   - SCRAM triggered: Adds +1β from tips
-    %   - Total: +1.6β > β → PROMPT CRITICAL → explosion
-    rho_tip_L = 0;
-    if t >= p.t_scram
-        dt_scram = t - p.t_scram;
-        % Exponential decay with time constant τ_tip = 2.0 s
-        rho_tip_L = p.rho_tip * exp(-dt_scram / p.tau_tip);
+    % compute_equilibrium() calculates rho_0 during initialization.
+    % This field MUST be present in p for the simulation to remain critical.
+    if isfield(p, 'rho_0')
+        rho_excess = p.rho_0;
+    else
+        % Fallback for uninitialized runs (will likely cause power decay)
+        rho_excess = 0.0;
     end
 
     % ------------------------------------------------------------------------
-    % TOTAL REACTIVITY (sum of all feedback mechanisms)
+    % TOTAL REACTIVITY (sum of all feedback mechanisms + excess)
     % ------------------------------------------------------------------------
-    rho_L = rho_void_L + rho_dop_L + rho_mod_L + rho_xen_L + rho_rod_L + rho_tip_L;
-    rho_U = rho_void_U + rho_dop_U + rho_mod_U + rho_xen_U + rho_rod_U;
-    % Note: rho_tip only in lower region (where rods enter during SCRAM)
+    % rho_total = rho_void + rho_Doppler + rho_xenon + rho_rod + rho_0
+    %
+    % At equilibrium: rho_total = 0 (criticality)
+    % rho > 0: supercritical (power increases)
+    % rho < 0: subcritical (power decreases)
+    rho_L = rho_void_L + rho_dop_L + rho_xen_L + rho_rod_L + rho_excess;
+    rho_U = rho_void_U + rho_dop_U + rho_xen_U + rho_rod_U + rho_excess;
 
     %% ========================================================================
     %  SECTION 4: DIFFERENTIAL EQUATIONS (SYSTEM DYNAMICS)
@@ -378,24 +316,15 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     dydt(2) = (p.beta / p.Lambda) * n_L - p.lambda_d * C_L;
 
     % ------------------------------------------------------------------------
-    % (3) VOID FRACTION - DDE TERM (Critical for Hopf Bifurcation)
+    % (3) VOID FRACTION - Lower Region (per LaTeX model)
     % ------------------------------------------------------------------------
-    % dα/dt = [(α_eq - α)/τ_v + k_adv × (α_past - α)] × saturation
+    % dα_L/dt = [(α_eq - α_L) / τ_void] × saturation
     %
-    % Two mechanisms:
-    %   1. Local relaxation: (α_eq - α) / τ_v
-    %      - Void fraction approaches equilibrium value
-    %      - Time constant τ_v ≈ 3-5 seconds (boiling dynamics)
-    %
-    %   2. Coolant advection (TRANSPORT DELAY): k_adv × (α_L_past - α)
-    %      - Upper region void driven by LOWER region void from τ_flow seconds ago
-    %      - α_L_past = α_L(t - τ_flow) where τ_flow = 2.0 s
-    %      - THIS DELAY CAUSES HOPF BIFURCATION (oscillations)
+    % Lower region: Only LOCAL relaxation toward equilibrium void
+    % No advection term because coolant ENTERS here (no upstream void transport)
     %
     % Saturation factor reduces sensitivity at high void (prevents runaway)
-    %
-    % For lower region: α_past = α_L (no upward advection, coolant enters here)
-    dydt(3) = ((alpha_eq_L - alpha_L) / p.tau_v_L + p.k_adv * (alpha_L_past - alpha_L)) * saturation_L;
+    dydt(3) = ((alpha_eq_L - alpha_L) / p.tau_void) * saturation_L;
 
     % ------------------------------------------------------------------------
     % (4) FUEL TEMPERATURE
@@ -431,22 +360,28 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     dydt(6) = p.y_I * n_L - p.lambda_I * I_L;
 
     % ------------------------------------------------------------------------
-    % (7) XENON-135 CONCENTRATION
+    % (7) XENON-135 CONCENTRATION (CORRECTED BURNOUT PHYSICS)
     % ------------------------------------------------------------------------
-    % dX/dt = y_X × n + λ_I × I - (λ_X + σ_X × n) × X
+    % dX/dt = y_X × n + λ_I × I - (λ_X + σ_X × Φ_0 × n) × X
     %
     % Three terms:
     %   1. Direct production from fission: y_X × n (small, ~0.3%)
     %   2. Production from I-135 decay:    λ_I × I (dominant source)
-    %   3. Loss (decay + burnout):         (λ_X + σ_X × n) × X
+    %   3. Loss (decay + burnout):         (λ_X + burnout_rate) × X
     %      - Radioactive decay: λ_X × X (half-life 9.1 hours)
-    %      - Neutron absorption (burnout): σ_X × n × X (power-dependent!)
+    %      - Neutron absorption (burnout): σ_X × Φ_0 × n × X
     %
-    % CRITICAL FOR CHERNOBYL ACCIDENT:
+    % CRITICAL: Burnout requires multiplying by nominal flux Φ_0!
+    %   σ_X (cm²) × Φ_0 (n/cm²/s) × n (dimensionless) → rate (1/s)
+    %   Without Φ_0, burnout ≈ 1e-18 (negligible vs λ_X ≈ 2e-5)
+    %   With Φ_0 = 1e14: burnout ≈ 2e-4 at n=1 (dominates decay!)
+    %
+    % XENON PIT EFFECT (Chernobyl scenario):
     %   After power reduction, xenon builds up (burnout decreases)
     %   Creates huge negative reactivity (up to -2800 pcm)
     %   Operators must withdraw rods to compensate → accident setup
-    dydt(7) = p.y_X * n_L + p.lambda_I * I_L - (p.lambda_X + p.sigma_X * n_L) * X_L;
+    burnout_L = p.sigma_X * p.Phi_nominal * n_L;
+    dydt(7) = p.y_X * n_L + p.lambda_I * I_L - (p.lambda_X + burnout_L) * X_L;
 
     % ------------------------------------------------------------------------
     % (8) CONTROL ROD POSITION
@@ -476,22 +411,25 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     % (10) Delayed neutron precursors
     dydt(10) = (p.beta / p.Lambda) * n_U - p.lambda_d * C_U;
 
-    % (11) Void fraction - CRITICAL DDE TERM
+    % (11) Void fraction - CRITICAL DDE TERM (per LaTeX model)
+    % dα_U/dt = [(α_eq - α_U)/τ_void + (2/τ_flow) × (α_L(t-τ) - α_U)] × saturation
+    %
     % Upper region void is driven by LOWER region void from τ_flow seconds ago!
-    % This is the coolant transport delay that causes oscillations
-    dydt(11) = ((alpha_eq_U - alpha_U) / p.tau_v_U + p.k_adv * (alpha_L_past - alpha_U)) * saturation_U;
+    % This is the coolant transport delay that causes oscillations (Hopf bifurcation)
+    dydt(11) = ((alpha_eq_U - alpha_U) / p.tau_void + (2/p.tau_flow) * (alpha_L_past - alpha_U)) * saturation_U;
 
     % (12) Fuel temperature
     dydt(12) = p.a_f * n_U - p.b_f * (Tf_U - p.Tc);
 
     % (13) Moderator temperature
-    dydt(13) = p.a_m * n_U - p.b_m * (Tm_U - p.Tm0);
+    dydt(13) = p.a_m * n_U - p.b_m * (Tm_U - p.Tc);
 
     % (14) Iodine-135
     dydt(14) = p.y_I * n_U - p.lambda_I * I_U;
 
-    % (15) Xenon-135
-    dydt(15) = p.y_X * n_U + p.lambda_I * I_U - (p.lambda_X + p.sigma_X * n_U) * X_U;
+    % (15) Xenon-135 (with corrected burnout)
+    burnout_U = p.sigma_X * p.Phi_nominal * n_U;
+    dydt(15) = p.y_X * n_U + p.lambda_I * I_U - (p.lambda_X + burnout_U) * X_U;
 
     % (16) Control rod position
     c_target_U = p.c_normal;  % Normal operating position (default: fully withdrawn)
