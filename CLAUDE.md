@@ -50,6 +50,10 @@ p = rbmk_parameters();
 **Bifurcation Sweep:**
 - `hopf_analysis.m` - 2-step pipeline: compute steady-state branch → analyze stability via eigenvalues
 
+**Visualization:**
+- `visualize_hopf_spiral.m` - 3D spiral bifurcation diagram showing stability degradation
+- `visualize_core_grid.m` - Core cross-section visualization
+
 ### Data Flow
 
 ```
@@ -114,3 +118,20 @@ p.kappa_V = 0.020;  % Reduce void coefficient
 - **Steady-state:** Levenberg-Marquardt via lsqnonlin with adaptive weighting for xenon equations (1000×) to ensure true equilibrium
 - **Eigenvalues:** Chebyshev spectral collocation (N=12 points gives machine precision), augmented matrix dimension 208×208
 - **Hopf detection:** Linear interpolation at stability margin zero-crossing
+
+## Generated Output Files
+
+After running `main`, the following files are created:
+- `rbmk_bifurcation_results.mat` - All analysis data (power levels, eigenvalues, stability margins, Hopf point)
+- `rbmk_analysis_*.log` - Detailed console log of the analysis session
+- `hopf_sweep_details_*.txt` - Tab-separated eigenvalue data at each power level
+- `steady_state_branch_*.txt` - Steady-state convergence data
+- `stability_branch_*.txt` - Stability margin data
+
+## Visualization (Post-Analysis)
+
+After running `main`, generate visualizations from saved results:
+```matlab
+results = load('rbmk_bifurcation_results.mat');
+visualize_hopf_spiral(results);  % 3D bifurcation diagram
+```
