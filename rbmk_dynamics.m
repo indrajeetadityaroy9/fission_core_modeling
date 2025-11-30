@@ -99,6 +99,15 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     X_U = y(15);     % Xenon-135 concentration
     c_U = y(16);     % Control rod position
 
+    % ========================================================================
+    % POWER CLAMPING - Prevent numerical overflow at extreme power
+    % ========================================================================
+    % Cap neutron density at 200× nominal (~320 GW total) to prevent Inf/NaN
+    % This represents the physical limit where fuel dispersal would terminate
+    % the excursion (not modeled explicitly, but implicit in the cap)
+    n_L = min(max(n_L, 1e-6), 200);
+    n_U = min(max(n_U, 1e-6), 200);
+
     % Extract delayed state (for transport delay τ_flow = 2.0 s)
     % The upper region void is driven by lower region void from 2 seconds ago
     % This delay is CRITICAL for Hopf bifurcation (oscillations)
@@ -180,8 +189,15 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     %
     % Typical values:
     %   α = 0.3 (30% void): ρ_void = +0.0075 = +1.5β (significant positive reactivity!)
-    rho_void_L = p.kappa_V * alpha_L;
-    rho_void_U = p.kappa_V * alpha_U;
+    %
+    % STATE-DEPENDENT COEFFICIENT:
+    %   At low power, kappa_V INCREASES (RBMK design flaw!)
+    %   This captures the physics that made Chernobyl possible.
+    kappa_V_L = compute_kappa_V(n_L, p);
+    kappa_V_U = compute_kappa_V(n_U, p);
+    rho_void_L = kappa_V_L * alpha_L;
+
+    rho_void_U = kappa_V_U * alpha_U;
 
     % ------------------------------------------------------------------------
     % B. DOPPLER REACTIVITY FEEDBACK (Fuel Temperature) - STABILIZING
@@ -195,8 +211,14 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     % Why this matters for stability:
     %   At LOW power:  weak Doppler → can't overcome positive void feedback
     %   At HIGH power: strong Doppler → dominates void feedback → stable
-    rho_dop_L = p.kappa_D * (sqrt(Tf_L) - sqrt(p.T0));
-    rho_dop_U = p.kappa_D * (sqrt(Tf_U) - sqrt(p.T0));
+    %
+    % STATE-DEPENDENT COEFFICIENT:
+    %   At low power, kappa_D is WEAKER (less fuel heating → less Doppler braking)
+    %   This removes the "safety brake" at low power.
+    kappa_D_L = compute_kappa_D(n_L, p);
+    kappa_D_U = compute_kappa_D(n_U, p);
+    rho_dop_L = kappa_D_L * (sqrt(Tf_L) - sqrt(p.T0));
+    rho_dop_U = kappa_D_U * (sqrt(Tf_U) - sqrt(p.T0));
 
     % ------------------------------------------------------------------------
     % C. XENON-135 REACTIVITY FEEDBACK - POWER-DEPENDENT STABILIZER
@@ -261,15 +283,80 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     end
 
     % ------------------------------------------------------------------------
-    % TOTAL REACTIVITY (sum of all feedback mechanisms + excess)
+    % F. FUEL DISPERSAL AND CORE DISASSEMBLY REACTIVITY
     % ------------------------------------------------------------------------
-    % rho_total = rho_void + rho_Doppler + rho_xenon + rho_rod + rho_0
+    % This is the mechanism that terminated the Chernobyl explosion.
+    % When fuel temperature exceeds melting point OR power exceeds critical
+    % threshold, massive negative reactivity is inserted as:
+    %   1. Fuel fragments and disperses (increased neutron leakage)
+    %   2. Core structure disintegrates (loss of geometry)
+    %   3. Coolant ejection (loss of moderation in some regions)
+    %
+    % PHYSICS (Nordheim-Fuchs theory):
+    %   The disassembly reactivity is proportional to the energy deposited
+    %   above the melting threshold. As fuel vaporizes and expands, it
+    %   physically moves apart, terminating the chain reaction.
+    %
+    % IMPLEMENTATION:
+    %   rho_disassembly = kappa_disassembly × f_disperse
+    %   where f_disperse ramps from 0 to 1 based on temperature and power
+
+    rho_disassembly_L = 0.0;
+    rho_disassembly_U = 0.0;
+
+    if isfield(p, 'use_fuel_dispersal') && p.use_fuel_dispersal
+        % Calculate total power for disassembly threshold check
+        P_total = (n_L + n_U) * p.k_P;  % Total power in MW
+
+        % --- LOWER REGION DISPERSAL ---
+        % Temperature-based dispersal (fuel melting/fragmentation)
+        if Tf_L > p.T_melt
+            % Smooth ramp from 0 at T_melt to 1 at T_disperse
+            f_temp_L = min(1.0, (Tf_L - p.T_melt) / (p.T_disperse - p.T_melt));
+            % Quadratic scaling (Nordheim-Fuchs: ∝ ΔT²)
+            f_temp_L = f_temp_L^2;
+        else
+            f_temp_L = 0.0;
+        end
+
+        % Power-based disassembly (mechanical destruction)
+        if P_total > p.P_disassembly
+            % Rapid onset once power threshold exceeded
+            f_power = min(1.0, (P_total - p.P_disassembly) / p.P_disassembly);
+            f_power = f_power^0.5;  % Square root for rapid onset
+        else
+            f_power = 0.0;
+        end
+
+        % Combined dispersal factor (whichever is larger)
+        f_disperse_L = max(f_temp_L, f_power);
+        rho_disassembly_L = p.kappa_disassembly * f_disperse_L;
+
+        % --- UPPER REGION DISPERSAL ---
+        % Temperature-based dispersal
+        if Tf_U > p.T_melt
+            f_temp_U = min(1.0, (Tf_U - p.T_melt) / (p.T_disperse - p.T_melt));
+            f_temp_U = f_temp_U^2;
+        else
+            f_temp_U = 0.0;
+        end
+
+        % Upper region also affected by total power disassembly
+        f_disperse_U = max(f_temp_U, f_power);
+        rho_disassembly_U = p.kappa_disassembly * f_disperse_U;
+    end
+
+    % ------------------------------------------------------------------------
+    % TOTAL REACTIVITY (sum of all feedback mechanisms + excess + disassembly)
+    % ------------------------------------------------------------------------
+    % rho_total = rho_void + rho_Doppler + rho_xenon + rho_rod + rho_0 + rho_disassembly
     %
     % At equilibrium: rho_total = 0 (criticality)
     % rho > 0: supercritical (power increases)
     % rho < 0: subcritical (power decreases)
-    rho_L = rho_void_L + rho_dop_L + rho_xen_L + rho_rod_L + rho_excess;
-    rho_U = rho_void_U + rho_dop_U + rho_xen_U + rho_rod_U + rho_excess;
+    % During excursion: rho_disassembly becomes large negative → terminates event
+    rho_L = rho_void_L + rho_dop_L + rho_xen_L + rho_rod_L + rho_excess + rho_disassembly_L;
+    rho_U = rho_void_U + rho_dop_U + rho_xen_U + rho_rod_U + rho_excess + rho_disassembly_U;
 
     %% ========================================================================
     %  SECTION 4: DIFFERENTIAL EQUATIONS (SYSTEM DYNAMICS)
@@ -452,4 +539,81 @@ function dydt = rbmk_dynamics(t, y, Z, p)
     % Note: No explicit bounds checking on state variables here
     % Solver (ode15s) will reduce time step if needed
     % Physical bounds enforced in steady-state solver via optimization bounds
+end
+
+
+%% =========================================================================
+%  HELPER FUNCTIONS: STATE-DEPENDENT REACTIVITY COEFFICIENTS
+%  =========================================================================
+
+function kappa_V = compute_kappa_V(n, p)
+% COMPUTE_KAPPA_V - Power-dependent void coefficient
+%
+% At low power, void coefficient INCREASES (RBMK design flaw!)
+% This captures the physics documented in INSAG-7.
+%
+% FORMULA:
+%   kappa_V(n) = kappa_V_low - (kappa_V_low - kappa_V_high) * (1 - exp(-n/n_transition))
+%
+% BEHAVIOR:
+%   n → 0:   kappa_V → kappa_V_low  (strongly positive, ~10β)
+%   n → 1:   kappa_V → kappa_V_high (moderate positive, ~3β)
+%
+% INPUTS:
+%   n - Normalized neutron density (n=1 at nominal 3200 MW)
+%   p - Parameter structure from rbmk_parameters()
+%
+% OUTPUT:
+%   kappa_V - Instantaneous void coefficient
+
+    % Check if dynamic coefficient is enabled
+    if ~isfield(p, 'use_dynamic_kappa_V') || ~p.use_dynamic_kappa_V
+        kappa_V = p.kappa_V;  % Use fixed value
+        return;
+    end
+
+    % Prevent numerical issues near zero power
+    n_safe = max(n, 0.01);
+
+    % Exponential transition from low to high power coefficient
+    kappa_V = p.kappa_V_low - (p.kappa_V_low - p.kappa_V_high) * ...
+              (1 - exp(-n_safe / p.kappa_V_transition));
+end
+
+
+function kappa_D = compute_kappa_D(n, p)
+% COMPUTE_KAPPA_D - Power-dependent Doppler coefficient
+%
+% At low power, Doppler effect is WEAKER because:
+%   1. Lower fuel temperature → less resonance broadening
+%   2. Smaller temperature rise per unit power change
+%
+% This removes the "safety brake" at low power, allowing positive
+% void feedback to dominate and drive the reactor unstable.
+%
+% FORMULA:
+%   kappa_D(n) = kappa_D_base * (1 - exp(-n * doppler_scale))
+%
+% BEHAVIOR:
+%   n → 0:   kappa_D → 0 (nearly no Doppler feedback!)
+%   n → 1:   kappa_D → kappa_D_base (full Doppler feedback)
+%
+% INPUTS:
+%   n - Normalized neutron density (n=1 at nominal 3200 MW)
+%   p - Parameter structure from rbmk_parameters()
+%
+% OUTPUT:
+%   kappa_D - Instantaneous Doppler coefficient (negative)
+
+    % Check if dynamic coefficient is enabled
+    if ~isfield(p, 'use_dynamic_kappa_D') || ~p.use_dynamic_kappa_D
+        kappa_D = p.kappa_D;  % Use fixed value
+        return;
+    end
+
+    % Prevent numerical issues near zero power
+    n_safe = max(n, 0.01);
+
+    % Doppler effectiveness scales with power
+    kappa_D = p.kappa_D_base * (1 - exp(-n_safe * p.doppler_scale));
 end

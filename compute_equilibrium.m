@@ -1,210 +1,210 @@
-function [y_eq, p_corrected, diagnostics] = compute_equilibrium(target_power_fraction, p)
-    % COMPUTE_EQUILIBRIUM - Robust steady-state solver with Criticality Search
+function [y_eq, p_corrected, diagnostics] = compute_equilibrium(target_power_fraction, p, options)
+    % COMPUTE_EQUILIBRIUM_ROBUST - Robust Initializer for RBMK Model
     %
     % DESCRIPTION:
-    %   Performs a "Critical Reactivity Search" to initialize the RBMK model.
-    %   If the physics parameters (Doppler/Xenon) overwhelm the control rods,
-    %   this function automatically calculates a 'bias' reactivity (rho_0)
-    %   to force criticality, simulating the core's excess fuel reactivity.
+    %   Calculates the steady-state vector y_eq (16x1) for a given power level.
+    %   Uses Constrained Minimization (fminbnd) to solve the criticality equation,
+    %   ensuring robustness against the non-linear "Tip Effect" and "Xenon Pit".
     %
-    %   This implements the fundamental reactor physics principle that fresh
-    %   fuel must have EXCESS REACTIVITY to overcome:
-    %     - Doppler broadening (negative feedback from fuel heating)
-    %     - Xenon-135 poisoning (negative feedback from fission products)
-    %     - Control rod absorption (negative reactivity for power control)
-    %
-    % USAGE:
-    %   [y0, p_new, diag] = compute_equilibrium(0.5, p);  % 50% power
-    %   % IMPORTANT: Pass p_new to rbmk_dynamics, not the original p!
+    % ROBUSTNESS UPGRADES:
+    %   1. SOLVER: Replaced fzero with fminbnd. This prevents the solver from
+    %      wandering outside physical bounds [0, 1] or crashing if no root exists.
+    %   2. PHYSICS: Automatically computes 'rho_0' (Excess Reactivity) if the
+    %      control rods alone are insufficient to balance the core.
+    %   3. UNITS: Strictly adheres to Kelvin temperatures and Flux scaling.
     %
     % INPUTS:
     %   target_power_fraction - Normalized power (0.0 to 1.0)
-    %                           n=1.0 corresponds to p.P_nominal per region
-    %   p                     - Parameter structure from rbmk_parameters()
+    %   p                     - Parameter struct from rbmk_parameters()
+    %   options               - (Optional) 'normal' or 'accident'
     %
     % OUTPUTS:
-    %   y_eq        - 16x1 State Vector ready for DDE integration
-    %   p_corrected - Parameter struct with added field 'rho_0' (Excess Reactivity)
-    %                 YOU MUST USE THIS for simulation, not the original p!
-    %   diagnostics - Structure containing reactivity breakdown for verification
+    %   y_eq        - 16x1 State Vector [L; U] ready for DDE solver
+    %   p_corrected - Parameter struct containing the calculated 'rho_0'
+    %   diagnostics - Struct with reactivity breakdown
     %
-    % PHYSICS:
-    %   At steady state, total reactivity must be zero:
-    %     rho_total = rho_void + rho_doppler + rho_xenon + rho_rod + rho_0 = 0
-    %
-    %   Where rho_0 represents the excess reactivity from fuel enrichment.
-    %   This function solves for rho_0 when the control rod range is insufficient.
-    %
-    % Author: RBMK Forensics Model
+    % AUTHOR: RBMK Forensics Model (Optimized Version)
 
-    %% 1. INITIALIZE & COPY PARAMETERS
-    p_corrected = p;
-    if ~isfield(p_corrected, 'rho_0')
-        p_corrected.rho_0 = 0.0; % Initialize if not present
+    %% 1. INITIALIZATION & SETUP
+    if nargin < 3, options = 'normal'; end
+    accident_mode = strcmpi(options, 'accident');
+
+    % Check if user passed the container struct instead of a specific mode
+    % rbmk_parameters() returns modes.normal and modes.accident
+    if isfield(p, 'normal') && isfield(p, 'accident')
+        % User passed the container - extract the appropriate mode
+        if accident_mode
+            p = p.accident;
+            warning('compute_equilibrium:ContainerDetected', ...
+                'Received parameter container. Auto-selecting p.accident based on options.');
+        else
+            p = p.normal;
+            warning('compute_equilibrium:ContainerDetected', ...
+                'Received parameter container. Auto-selecting p.normal based on options.');
+        end
     end
 
-    % Flux Scaling for Xenon burnout
+    p_corrected = p;
+    % Ensure rho_0 exists (will be overwritten if needed)
+    if ~isfield(p_corrected, 'rho_0'), p_corrected.rho_0 = 0.0; end
+
+    % Set Flux for Xenon Burnout (Must match p.Phi_nominal logic)
     if isfield(p, 'Phi_nominal')
         Phi = p.Phi_nominal;
     else
-        Phi = 1.0e14;  % Default RBMK thermal flux (n/cm^2/s)
+        Phi = 1.0e14;
     end
 
-    %% 2. CALCULATE STATE VARIABLES (Algebraic Equilibrium)
+    %% 1.5. PARAMETER INTEGRITY CHECK
+    % Verify that the selected 'p' struct has the required physics fields.
+    % This catches errors where the user passes an empty or malformed struct.
+
+    required_fields = {'beta', 'Lambda', 'm_flow', 'tau_flow', 'Dn', ...
+                       'K_heat', 'kappa_X', 'lambda_I', 'lambda_X', ...
+                       'c_scram', 'c_normal', 't_scram', 'tau_c'};
+
+    for i = 1:length(required_fields)
+        if ~isfield(p, required_fields{i})
+            error('compute_equilibrium:MissingField', ...
+                'Parameter struct is missing required field: %s', required_fields{i});
+        end
+    end
+
+    % Verify Flow/Delay Consistency (Physics Sanity Check)
+    % Nominal: 8000 kg/s -> 2.0s, so tau_flow ~ 16000 / m_flow
+    estimated_tau = 16000 / p.m_flow;
+    if abs(p.tau_flow - estimated_tau) > 0.5
+        warning('compute_equilibrium:PhysicsMismatch', ...
+            'tau_flow (%.2fs) does not match flow scaling (approx %.2fs). Check parameters.', ...
+            p.tau_flow, estimated_tau);
+    end
+
+    %% 2. CALCULATE ALGEBRAIC STATE VARIABLES
+    % Solve differential equations at steady state (dy/dt = 0)
+    
     n = target_power_fraction;
 
-    % ------------------------------------------------------------------------
-    % A. NEUTRON KINETICS: Precursor Equilibrium
-    % ------------------------------------------------------------------------
-    % From dC/dt = (beta/Lambda)*n - lambda_d*C = 0
-    % Solving: C_eq = (beta / (Lambda * lambda_d)) * n
-    %
-    % For RBMK: ratio = 0.005 / (4.8e-4 * 0.08) = 130.2
-    % CRITICAL: C must be ~130x larger than n, or power will crash!
+    % A. Precursors: C = (beta / (Lambda * lambda_d)) * n
     C = (p.beta / (p.Lambda * p.lambda_d)) * n;
 
-    % ------------------------------------------------------------------------
-    % B. THERMAL EQUILIBRIUM
-    % ------------------------------------------------------------------------
-    % From dT/dt = a*n - b*(T - Tc) = 0
-    % Solving: T_eq = Tc + (a/b)*n
-    Tf = p.Tc + (p.a_f / p.b_f) * n;  % Fuel temperature (K)
-    Tm = p.Tc + (p.a_m / p.b_m) * n;  % Moderator temperature (K)
+    % B. Temperatures (Kelvin): T = Tc + (a/b)*n
+    Tf = p.Tc + (p.a_f / p.b_f) * n; 
+    Tm = p.Tc + (p.a_m / p.b_m) * n;
 
-    % ------------------------------------------------------------------------
-    % C. IODINE & XENON EQUILIBRIUM
-    % ------------------------------------------------------------------------
-    % Iodine: dI/dt = y_I*n - lambda_I*I = 0
+    % C. Iodine & Xenon (with Flux Burnout)
     I = (p.y_I / p.lambda_I) * n;
-
-    % Xenon: dX/dt = y_X*n + lambda_I*I - (lambda_X + sigma_X*Phi*n)*X = 0
-    % Production = Direct yield + Iodine decay
-    % Loss = Radioactive decay + Neutron burnout (flux-dependent!)
+    
     production = (p.y_X * n) + (p.lambda_I * I);
-    burnout_rate = p.sigma_X * Phi * n;  % [cm^2] * [1/cm^2/s] * [1] = [1/s]
+    burnout_rate = p.sigma_X * Phi * n; % Rate in 1/s
     X = production / (p.lambda_X + burnout_rate);
 
-    % ------------------------------------------------------------------------
-    % D. THERMAL-HYDRAULIC EQUILIBRIUM (Void Fraction)
-    % ------------------------------------------------------------------------
-    % Steam quality: x = K_heat * n / m_flow
-    x = (p.K_heat * n) / p.m_flow;
-    x = max(0, x + 1e-9);  % Small epsilon for numerical stability
+    % D. Thermal-Hydraulics (Boiling Curve)
+    x_quality = (p.K_heat * n) / p.m_flow;
+    x_quality = max(0, x_quality + 1e-9); % Prevent numerical zero
+    alpha = p.alpha_max * (x_quality^p.p_shape) / (1 + x_quality^p.p_shape);
 
-    % Void fraction from boiling curve (equilibrium, no saturation factor)
-    alpha = p.alpha_max * (x^p.p_shape) / (1 + x^p.p_shape);
+    %% 3. CALCULATE INHERENT REACTIVITY
+    % These feedbacks are fixed by the physics state (n, T, alpha, X)
+    
+    % Void Feedback (Dynamic check)
+    if isfield(p, 'use_dynamic_kappa_V') && p.use_dynamic_kappa_V
+        n_safe = max(n, 0.01);
+        kappa_V_eq = p.kappa_V_low - (p.kappa_V_low - p.kappa_V_high) * ...
+                     (1 - exp(-n_safe / p.kappa_V_transition));
+    else
+        kappa_V_eq = p.kappa_V;
+    end
+    rho_void = kappa_V_eq * alpha;
 
-    %% 3. CALCULATE INHERENT REACTIVITY FEEDBACKS
-    rho_void = p.kappa_V * alpha;                           % Positive (RBMK flaw)
-    rho_dop  = p.kappa_D * (sqrt(Tf) - sqrt(p.T0));        % Negative (stabilizing)
-    rho_xen  = -p.kappa_X * X;                              % Negative (poison)
+    % Doppler Feedback (Dynamic check, using Kelvin T0)
+    if isfield(p, 'use_dynamic_kappa_D') && p.use_dynamic_kappa_D
+        n_safe = max(n, 0.01);
+        kappa_D_eq = p.kappa_D_base * (1 - exp(-n_safe * p.doppler_scale));
+    else
+        kappa_D_eq = p.kappa_D;
+    end
+    rho_dop = kappa_D_eq * (sqrt(Tf) - sqrt(p.T0));
 
-    % Net inherent reactivity (without rods or excess fuel)
+    % Xenon Feedback
+    rho_xen = -p.kappa_X * X;
+
+    % Total Inherent Reactivity (The "Load" the rods must carry)
     rho_inherent = rho_void + rho_dop + rho_xen;
 
-    %% 4. CRITICALITY SEARCH (The Critical Step)
-    % We need: rho_inherent + rho_rod(c) + rho_0 = 0
-    %
-    % Strategy:
-    %   1. First assume rho_0 = 0. Can control rods balance the core?
-    %   2. If yes, solve for c_eq using fzero.
-    %   3. If no (rods insufficient), calculate required rho_0.
-
-    % Define Rod Reactivity Function (with tip effect)
-    % Use element-wise operations (.*) for vectorized evaluation
+    %% 4. CRITICALITY SEARCH (ROBUST OPTIMIZATION)
+    % Goal: Find c and rho_0 such that: rho_inherent + rho_rod(c) + rho_0 = 0
+    
+    % Rod Reactivity Function (Lower Core Physics includes Tip Effect)
     rod_func = @(c) (p.kappa_tip .* c .* exp(-10.*c) - p.kappa_boron .* c);
 
-    % We need rho_rod = -rho_inherent to achieve criticality
-    rho_target = -rho_inherent;
-
-    % Determine the achievable range of rod reactivity
-    c_vals = linspace(0, 1, 100);
-    rho_vals = rod_func(c_vals);
-    min_rod = min(rho_vals);  % Most negative (rods fully in)
-    max_rod = max(rho_vals);  % Most positive (tip effect peak)
-
-    if rho_target >= min_rod && rho_target <= max_rod
-        % CASE A: Control rods can achieve criticality
-        % Solve rod_func(c) = rho_target
-        %
-        % CHALLENGE: rod_func is NON-MONOTONIC (peaks at c≈0.1)
-        % fzero needs an interval where the function changes sign.
-        %
-        % Strategy: Find the peak, then search appropriate interval
-        [~, peak_idx] = max(rho_vals);
-        c_peak = c_vals(peak_idx);
-        rho_peak = max_rod;
-
-        problem = @(c) rod_func(c) - rho_target;
-
-        try
-            if rho_target >= 0 && rho_target <= rho_peak
-                % Target is positive: solution is on the rising side (0 to peak)
-                % Check if there's a sign change
-                if problem(0) * problem(c_peak) <= 0
-                    c_eq = fzero(problem, [0, c_peak]);
-                else
-                    % No sign change, target might equal peak or endpoint
-                    c_eq = fzero(problem, c_peak);  % Start from peak
-                end
-            else
-                % Target is negative: solution is on the falling side (peak to 1)
-                if problem(c_peak) * problem(1) <= 0
-                    c_eq = fzero(problem, [c_peak, 1]);
-                else
-                    c_eq = fzero(problem, 0.5);  % Fallback starting point
-                end
-            end
+    if accident_mode
+        % --- ACCIDENT SCENARIO ---
+        % Force rods fully withdrawn (c=0) to simulate the "Trap".
+        % Calculate exactly how much excess reactivity is needed to be critical.
+        c_eq = 0.0;
+        
+        % At c=0, rho_rod is 0.
+        % The missing reactivity must come from rho_0.
+        rho_missing = -(rho_inherent + rod_func(c_eq));
+        
+        p_corrected.rho_0 = rho_missing;
+        status = 'ACCIDENT MODE (c=0 forced)';
+        
+    else
+        % --- NORMAL OPERATION ---
+        % Try to find a rod position c in [0, 1] that balances the core.
+        % We minimize the squared error of reactivity.
+        
+        rho_target = -rho_inherent;
+        
+        % Objective: Minimize |rho_rod(c) - rho_target|
+        objective = @(c) abs(rod_func(c) - rho_target);
+        
+        % fminbnd is robust: it respects bounds and handles non-roots.
+        opts = optimset('TolX', 1e-8, 'Display', 'off');
+        [c_eq, error_val] = fminbnd(objective, 0.0, 1.0, opts);
+        
+        % Calculate the residual (what the rods couldn't handle)
+        rho_rod_actual = rod_func(c_eq);
+        residual = rho_inherent + rho_rod_actual;
+        
+        % If error is small, rods balanced it. If large, add rho_0.
+        if error_val < 1e-7
             p_corrected.rho_0 = 0.0;
             status = 'Converged (Rods only)';
-        catch
-            % Fallback: set c to achieve closest match, add rho_0 for balance
-            if rho_target > 0
-                c_eq = c_peak;  % Use peak for max positive reactivity
-            else
-                c_eq = 1.0;     % Use full insertion for max negative
-            end
-            p_corrected.rho_0 = -(rho_inherent + rod_func(c_eq));
-            status = sprintf('Fallback (c=%.2f, rho_0=%+.4f)', c_eq, p_corrected.rho_0);
+        else
+            % Rods hit a limit (0 or 1), use rho_0 to make up the rest.
+            p_corrected.rho_0 = -residual;
+            status = sprintf('Limit Reached (c=%.2f, rho_0 added)', c_eq);
         end
-    else
-        % CASE B: Rods cannot balance the core (need excess reactivity)
-        % This is normal! Real reactors have excess fuel reactivity.
-        %
-        % Set rods to "normal" position (withdrawn, c=0)
-        c_eq = 0.0;
-
-        % Calculate the missing reactivity (excess fuel reactivity)
-        % Criticality: 0 = rho_inherent + rho_rod(0) + rho_0
-        rho_rod_actual = rod_func(c_eq);
-        p_corrected.rho_0 = -(rho_inherent + rho_rod_actual);
-
-        status = sprintf('Converged (rho_0 = %+.4f = %+.2f beta)', ...
-            p_corrected.rho_0, p_corrected.rho_0/p.beta);
     end
 
-    %% 5. ASSEMBLE STATE VECTOR
-    % Both regions start in symmetric equilibrium
+    %% 5. ASSEMBLE OUTPUT VECTORS
+    % Initialize both regions symmetrically
+    % State Vector: [n, C, alpha, Tf, Tm, I, X, c]
     y_L = [n; C; alpha; Tf; Tm; I; X; c_eq];
     y_U = [n; C; alpha; Tf; Tm; I; X; c_eq];
+    
     y_eq = [y_L; y_U];
 
-    %% 6. DIAGNOSTICS OUTPUT
+    %% 6. DIAGNOSTICS
+    diagnostics.n = n;
+    diagnostics.c_eq = c_eq;
+    diagnostics.rho_0 = p_corrected.rho_0;
     diagnostics.rho_void = rho_void;
     diagnostics.rho_dop = rho_dop;
     diagnostics.rho_xen = rho_xen;
     diagnostics.rho_rod = rod_func(c_eq);
-    diagnostics.rho_0 = p_corrected.rho_0;
-    diagnostics.rho_total = rho_void + rho_dop + rho_xen + rod_func(c_eq) + p_corrected.rho_0;
-    diagnostics.c_eq = c_eq;
-    diagnostics.void_fraction = alpha;
-    diagnostics.fuel_temp = Tf;
-    diagnostics.xenon = X;
-    diagnostics.precursor_ratio = C / n;
+    diagnostics.rho_total = rho_inherent + rod_func(c_eq) + p_corrected.rho_0;
     diagnostics.status = status;
-
-    fprintf('Equilibrium [n=%.3f]: %s\n', n, status);
-    fprintf('  Reactivity: void=%+.4f, dop=%+.4f, xen=%+.4f, rod=%+.4f, rho_0=%+.4f\n', ...
-        rho_void, rho_dop, rho_xen, rod_func(c_eq), p_corrected.rho_0);
-    fprintf('  Total rho = %.2e (should be ~0)\n', diagnostics.rho_total);
+    
+    % Verification Printout
+    fprintf('COMPUTE_EQUILIBRIUM [Power=%.2f]: %s\n', n, status);
+    fprintf('  Reactivity Breakdown:\n');
+    fprintf('    Void:    %+.5f\n', rho_void);
+    fprintf('    Doppler: %+.5f\n', rho_dop);
+    fprintf('    Xenon:   %+.5f\n', rho_xen);
+    fprintf('    Rod(c):  %+.5f (c=%.4f)\n', rod_func(c_eq), c_eq);
+    fprintf('    Excess:  %+.5f (rho_0)\n', p_corrected.rho_0);
+    fprintf('    TOTAL:   %+.1e (Should be ~0)\n', diagnostics.rho_total);
 end

@@ -41,15 +41,25 @@ fprintf('   Target Power:  %6.0f MW (%.1f%% of nominal)\n', target_power_mw, pow
 fprintf('   Coolant Flow:  %6.0f kg/s (reduced)\n', p.m_flow);
 fprintf('   SCRAM Time:    %6.1f s\n', p.t_scram);
 
-% 3. Criticality Search
-[y0, p_sim, diag] = compute_equilibrium(power_fraction, p);
+% 3. Criticality Search - ACCIDENT MODE
+%    Force rods withdrawn to simulate the actual Chernobyl pre-accident state
+%    where operators had withdrawn control rods to overcome xenon poisoning.
+[y0, p_sim, diag] = compute_equilibrium(power_fraction, p, 'accident');
 
-fprintf('\n[STATUS] Initial Equilibrium:\n');
-fprintf('   Rod Position (c):    %.4f (%.1f%% inserted)\n', diag.c_eq, diag.c_eq*100);
+fprintf('\n[STATUS] Initial Equilibrium (ACCIDENT MODE):\n');
+fprintf('   Rod Position (c):    %.4f (%.1f%% inserted) - FORCED WITHDRAWN\n', diag.c_eq, diag.c_eq*100);
 fprintf('   Void Fraction:       %.2f%%\n', diag.void_fraction * 100);
 fprintf('   Fuel Temperature:    %.1f K\n', diag.fuel_temp);
 fprintf('   Xenon Concentration: %.2e\n', diag.xenon);
-fprintf('   Excess Reactivity:   %+.2f beta\n', diag.rho_0 / p.beta);
+fprintf('   Excess Reactivity:   %+.2f beta (adjusted for rod withdrawal)\n', diag.rho_0 / p.beta);
+
+% Display dynamic coefficient values
+if isfield(diag, 'kappa_V_eff')
+    fprintf('\n[STATUS] Power-Dependent Coefficients (at %.0f MW):\n', target_power_mw);
+    fprintf('   kappa_V: %.4f (%+.2f beta) [ELEVATED - low power danger!]\n', ...
+        diag.kappa_V_eff, diag.kappa_V_eff/p.beta);
+    fprintf('   kappa_D: %.5f [WEAKENED - reduced safety margin!]\n', diag.kappa_D_eff);
+end
 
 fprintf('\n[STATUS] Initial Reactivity Balance:\n');
 fprintf('   Void:    %+.4f (%+.2f beta)\n', diag.rho_void, diag.rho_void/p.beta);
@@ -59,8 +69,11 @@ fprintf('   Rod:     %+.4f (%+.2f beta)\n', diag.rho_rod, diag.rho_rod/p.beta);
 fprintf('   ---------------------------------\n');
 fprintf('   Total:   %+.2e (should be ~0)\n', diag.rho_total);
 
-if diag.c_eq > 0.1
-    warning('Initial rod position > 0.1. The "Tip Effect" may be diminished.');
+if diag.c_eq < 0.05
+    fprintf('\n   [DANGER] Rods fully withdrawn - Tip effect is FULLY ARMED.\n');
+    fprintf('   [DANGER] This replicates the Chernobyl pre-accident configuration.\n');
+elseif diag.c_eq > 0.1
+    warning('Rod position > 0.1. The "Tip Effect" may be diminished.');
 else
     fprintf('\n   [OK] Rods withdrawn - Tip effect is ARMED.\n');
 end
@@ -74,8 +87,9 @@ tspan = [0 60];
 lags = p_sim.tau_flow;
 history = y0;
 
-% Strict tolerances for prompt critical kinetics
-options = ddeset('RelTol', 1e-6, 'AbsTol', 1e-8, 'InitialStep', 1e-4, 'MaxStep', 0.1);
+% Tighter tolerances and smaller max step for rapid excursion dynamics
+% MaxStep = 0.01 is critical to capture the ~15ms e-folding time
+options = ddeset('RelTol', 1e-8, 'AbsTol', 1e-10, 'InitialStep', 1e-5, 'MaxStep', 0.01);
 
 tic;
 try
@@ -124,13 +138,31 @@ P_Total = P_L + P_U;
 %  ========================================================================
 % All values in absolute units, then converted to beta
 
-% --- VOID REACTIVITY (Positive - THE RBMK FLAW) ---
-rho_void_L = p_sim.kappa_V .* alpha_L;
-rho_void_U = p_sim.kappa_V .* alpha_U;
+% --- POWER-DEPENDENT VOID COEFFICIENT (RBMK FLAW: increases at low power) ---
+if isfield(p_sim, 'use_dynamic_kappa_V') && p_sim.use_dynamic_kappa_V
+    n_L_safe = max(n_L, 0.01);
+    n_U_safe = max(n_U, 0.01);
+    kappa_V_L = p_sim.kappa_V_low - (p_sim.kappa_V_low - p_sim.kappa_V_high) .* ...
+                (1 - exp(-n_L_safe / p_sim.kappa_V_transition));
+    kappa_V_U = p_sim.kappa_V_low - (p_sim.kappa_V_low - p_sim.kappa_V_high) .* ...
+                (1 - exp(-n_U_safe / p_sim.kappa_V_transition));
+else
+    kappa_V_L = p_sim.kappa_V * ones(size(n_L));
+    kappa_V_U = p_sim.kappa_V * ones(size(n_U));
+end
+rho_void_L = kappa_V_L .* alpha_L;
+rho_void_U = kappa_V_U .* alpha_U;
 
-% --- DOPPLER REACTIVITY (Negative - Stabilizing) ---
-rho_dop_L = p_sim.kappa_D .* (sqrt(Tf_L) - sqrt(p_sim.T0));
-rho_dop_U = p_sim.kappa_D .* (sqrt(Tf_U) - sqrt(p_sim.T0));
+% --- POWER-DEPENDENT DOPPLER COEFFICIENT (Weaker at low power) ---
+if isfield(p_sim, 'use_dynamic_kappa_D') && p_sim.use_dynamic_kappa_D
+    kappa_D_L = p_sim.kappa_D_base * (1 - exp(-n_L_safe * p_sim.doppler_scale));
+    kappa_D_U = p_sim.kappa_D_base * (1 - exp(-n_U_safe * p_sim.doppler_scale));
+else
+    kappa_D_L = p_sim.kappa_D * ones(size(n_L));
+    kappa_D_U = p_sim.kappa_D * ones(size(n_U));
+end
+rho_dop_L = kappa_D_L .* (sqrt(Tf_L) - sqrt(p_sim.T0));
+rho_dop_U = kappa_D_U .* (sqrt(Tf_U) - sqrt(p_sim.T0));
 
 % --- XENON REACTIVITY (Negative - Poison) ---
 rho_xen_L = -p_sim.kappa_X .* X_L;
@@ -369,6 +401,22 @@ if max_void_rho > 0
     fprintf('[PASS] Positive Void Coeff: Peak void reactivity = %+.2f beta\n', max_void_rho);
 else
     fprintf('[FAIL] Positive Void Coeff: Void reactivity is negative!\n');
+end
+
+% Check 2b: Dynamic Void Coefficient (should be higher at low power)
+if isfield(p_sim, 'use_dynamic_kappa_V') && p_sim.use_dynamic_kappa_V
+    max_kappa_V = max(kappa_V_L);
+    min_kappa_V = min(kappa_V_L);
+    fprintf('[INFO] Dynamic kappa_V: Range %.4f to %.4f (%.1fx variation)\n', ...
+        min_kappa_V, max_kappa_V, max_kappa_V/min_kappa_V);
+end
+
+% Check 2c: Dynamic Doppler Coefficient (should be weaker at low power)
+if isfield(p_sim, 'use_dynamic_kappa_D') && p_sim.use_dynamic_kappa_D
+    max_kappa_D = max(abs(kappa_D_L));
+    min_kappa_D = min(abs(kappa_D_L));
+    fprintf('[INFO] Dynamic kappa_D: Range %.5f to %.5f (Doppler weakened at low power)\n', ...
+        min_kappa_D, max_kappa_D);
 end
 
 % Check 3: Tip Effect (Must go positive after SCRAM)
